@@ -41,6 +41,11 @@ jobs:
     - name: Install dependencies
       run: pip install -r src/requirements.txt
 
+    # The import tests (test_e2e.py:312) hard-require pandoc for docx/html/md
+    # -> RST. GitHub's ubuntu runner doesn't ship it, so install it explicitly.
+    - name: Install pandoc
+      run: sudo apt-get update -qq && sudo apt-get install -y -qq pandoc
+
     # Hermetic end-to-end suite: RST preview, clone (local bare repo + mock
     # API), edit/commit/push, PR, import, file CRUD.
     - name: Run e2e suite

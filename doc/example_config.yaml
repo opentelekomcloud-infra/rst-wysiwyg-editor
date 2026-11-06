@@ -1,0 +1,37 @@
+# ---------------------------------------------------------------------------
+# Example configuration for the RST WYSIWYG editor.
+#
+# This is the same flat YAML shape the app saves/loads from the browser
+# (config_yaml.js) and from the server (config_io.py). It exists so the
+# `yaml-quality` workflow has a real, meaningful config file to validate, and
+# to document the shape of a saved config.
+#
+# Every value here is a SAFE PLACEHOLDER -- no real host, token, or key. The
+# multi-line `ssh_key` uses the single-quoted flow-scalar form that both PyYAML
+# (this check) and the app's own config_yaml.js round-trip identically.
+#
+# To use it: copy the keys into the UI's Settings panel (or Settings -> Export)
+# and replace each placeholder with your real values. The server writes config
+# files 0600 because they hold secrets.
+# ---------------------------------------------------------------------------
+
+url: "git@gitea.example.com:2222/docs/testservice.git"
+source_branch: "test"
+target_branch: "main"
+upstream: "git@gitea.example.com:2222/docs/upstream.git"
+ssh_key: '-----BEGIN OPENSSH PRIVATE KEY-----
+
+  b3BlbnNzaC1rZXktdjEAAAAABG5v
+
+  placeholder-example-not-a-real-key
+
+  -----END OPENSSH PRIVATE KEY-----'
+ssh_host: "gitea.example.com"
+ssh_port: "2222"
+commit_name: "Your Name"
+commit_email: "you@example.com"
+api_token: "paste-your-api-token-here"
+provider: "gitea"
+api_base: "https://gitea.example.com/api/v1"
+proxy: ''
+work_root: "/work"
