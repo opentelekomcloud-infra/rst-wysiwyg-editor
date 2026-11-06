@@ -75,8 +75,8 @@ Need a non-corporate base? Pass `--build-arg BASE=<image>` (e.g. the public
 
 ### Continuous delivery (GitHub Actions → SWR)
 
-`.github/workflows/` contains two workflows (mirroring the
-circle-partner-navigator-frontend setup):
+`.github/workflows/` contains the delivery + quality-gate + automerge
+workflows (mirroring the circle-partner-navigator-frontend setup):
 
 - **`docker-build.yml`** — on pull requests: builds the image (no push) as a
   PR check; when the PR is merged, builds **and pushes** to SWR.
@@ -91,6 +91,9 @@ circle-partner-navigator-frontend setup):
   `test_tree.js`).
 - **`yaml-quality.yml`** — parses every YAML file in the repo (all workflows,
   config fixtures) with `yaml.safe_load_all`.
+- **`automerge.yaml`** — when a PR is labeled `gate`, automatically merges it
+  (squash) as soon as **all** checks pass, all required reviews are approved,
+  and branch-protection rules are satisfied.
 
 Images are tagged by `docker/metadata-action` (branch / PR / semver / sha) and
 pushed as `<SWR_URL>/t-cloud-public/rst-wysiwyg-editor:<tag>`.
@@ -105,10 +108,20 @@ Required **repository secrets** (Settings → Secrets and variables → Actions)
 | `ARTIFACTORY_URL`          | DHI Artifactory registry domain (host part, no image path) |
 | `ARTIFACTORY_AUTH_USERNAME`| Artifactory username                     |
 | `ARTIFACTORY_AUTH_PASSWORD`| Artifactory password                     |
+| `APP_ID`                   | GitHub App ID (for the `automerge.yaml` workflow) |
+| `APP_KEY`                  | GitHub App private key (PEM, for the `automerge.yaml` workflow) |
 
 > Never commit registry credentials; the workflows reference them only via
 > GitHub secrets. The Dockerfile itself contains no registry address (the base
 > image is chosen via `--build-arg ARTIFACTORY_URL`).
+>
+> **Automerge** uses a GitHub App (`APP_ID` + `APP_KEY`), not a PAT — the
+> `create-github-app-token` action mints a short-lived token that can bypass
+> branch-protection and satisfy required reviews, which a fine-grained PAT
+> cannot do. Create the App (Settings → Developer settings → GitHub Apps) with
+> `Contents: Read` + `Pull requests: Read/Write` and install it on this repo.
+> Then label a ready PR `gate` and it merges automatically once every check is
+> green and all required reviews are approved.
 
 Repo clones are cached in `/work`; attach a named volume (or `-v`) to persist them
 across container runs. No credentials are baked into the image — SSH keys and
