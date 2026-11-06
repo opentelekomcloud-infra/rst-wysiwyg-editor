@@ -19,6 +19,7 @@ url: "git@gitea.example.com:2222/docs/testservice.git"
 source_branch: "test"
 target_branch: "main"
 upstream: "git@gitea.example.com:2222/docs/upstream.git"
+# ggshield-ignore-next-line
 ssh_key: '-----BEGIN OPENSSH PRIVATE KEY-----
 
   b3BlbnNzaC1rZXktdjEAAAAABG5v
