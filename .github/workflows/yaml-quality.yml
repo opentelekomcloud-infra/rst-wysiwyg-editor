@@ -1,0 +1,39 @@
+name: YAML Validation
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  yaml-checks:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
+
+    - name: Install PyYAML
+      run: pip install 'PyYAML==6.0.3'
+
+    # Parse every YAML file in the repo (workflows, configs, fixtures).
+    # safe_load_all handles both single- and multi-document files.
+    - name: Validate all YAML files
+      run: |
+        python - <<'EOF'
+        import glob, sys
+        import yaml
+        files = sorted(glob.glob('**/*.yml', recursive=True) +
+                       glob.glob('**/*.yaml', recursive=True))
+        if not files:
+            print('no YAML files found')
+            sys.exit(1)
+        for f in files:
+            with open(f, encoding='utf-8') as fh:
+                list(yaml.safe_load_all(fh))
+            print('OK', f)
+        print(f'{len(files)} YAML files valid')
+        EOF

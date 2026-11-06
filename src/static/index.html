@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RST WYSIWYG Editor</title>
+<link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+<div id="app">
+  <!-- Top connection bar -->
+  <header id="topbar">
+    <div class="brand">
+      <span class="logo">RST</span>
+      <span class="title">reStructuredText Editor</span>
+    </div>
+    <div id="connect" class="connect">
+      <input type="text" id="repo-url" placeholder="git@github.com:owner/repo.git  (or https://…)" />
+      <input type="text" id="source-branch" value="main" title="Source / base branch (you branch from this; usually the protected default)" placeholder="source (main)" class="branch-input" />
+      <span class="arrow">→</span>
+      <input type="text" id="target-branch" title="Target / head branch (commits land here; auto-created if it doesn't exist)" placeholder="target (new branch)" class="branch-input" />
+      <button id="btn-clone" class="primary">Clone / Open</button>
+      <button id="btn-reset-clone" title="Discard the local working copy and re-clone fresh from the remote (fetches latest, resets any local-only branches). Use after a restart or if the local content is stale.">Reset &amp; re-clone</button>
+      <button id="btn-settings-top" title="Connection &amp; publishing settings">⚙</button>
+    </div>
+  </header>
+
+  <!-- Settings drawer (SSH key, identity, PR) -->
+  <div id="settings-drawer" class="hidden">
+    <h3>Connection &amp; Publishing</h3>
+    <div class="grid">
+      <label>SSH Private Key
+        <textarea id="ssh-key" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;…paste your private key (optional if ~/.ssh default key works)"></textarea>
+      </label>
+      <label>SSH Host override (optional)
+        <input type="text" id="ssh-host" placeholder="leave blank to use URL host" />
+      </label>
+      <label>SSH Port
+        <input type="number" id="ssh-port" value="22" />
+      </label>
+      <label>Commit Name
+        <input type="text" id="commit-name" placeholder="Your Name" />
+      </label>
+      <label>Commit Email
+        <input type="text" id="commit-email" placeholder="you@example.com" />
+      </label>
+      <label>API Token (GitHub / Gitea)
+        <input type="password" id="api-token" placeholder="ghp_…  or  Gitea token" />
+      </label>
+      <label>Provider
+        <select id="provider">
+          <option value="">auto-detect</option>
+          <option value="github">GitHub</option>
+          <option value="gitea">Gitea</option>
+        </select>
+      </label>
+      <label>API Base URL (optional, for self-hosted)
+        <input type="text" id="api-base" placeholder="https://gitea.example.com/api/v1" />
+      </label>
+      <label>Upstream / original repo (optional, for forks)
+        <input type="text" id="upstream" placeholder="opentelekomcloud-docs/test-repo" />
+      </label>
+      <label>Proxy for API calls (optional, for corporate networks)
+        <span class="input-row">
+          <input type="text" id="proxy" placeholder="http://proxy.example.com:3128  (leave blank = use env/default)" />
+          <button id="btn-detect-proxy" type="button" title="Fill from this machine's http_proxy/https_proxy env vars">auto</button>
+        </span>
+      </label>
+    </div>
+    <div class="drawer-actions">
+      <button id="btn-check-token">Test token</button>
+      <span id="token-status" class="status"></span>
+      <button id="btn-save-settings" class="primary">Save &amp; Close</button>
+    </div>
+
+    <!-- Config file save/load -->
+    <div class="config-section">
+      <h4>Configuration (stored in your browser)</h4>
+      <div class="input-row">
+        <button id="btn-save-config" type="button" title="Save the current settings (repo, branches, key, token, proxy…) to this browser's localStorage">Save</button>
+        <button id="btn-export-config" type="button" title="Download the settings as a config.yaml file (to move to another machine)">Export…</button>
+        <button id="btn-import-config" type="button" title="Load settings from a config.yaml file">Import…</button>
+        <input type="file" id="config-import-file" accept=".yaml,.yml" style="display:none;" />
+      </div>
+      <span id="config-status" class="status"></span>
+      <p class="config-note">Saved in this browser (localStorage) — the server keeps no copy, so no secrets ever persist on the machine hosting the app. Use Export/Import to move the config between machines.</p>
+      <div class="input-row" style="margin-top:8px;">
+        <input type="text" id="work-root" placeholder="<app>/work  (where repo working copies are cached)" />
+        <button id="btn-browse-workroot" type="button" title="Browse the server filesystem to pick a working directory">Browse…</button>
+      </div>
+      <span id="workroot-status" class="status"></span>
+      <p class="config-note">Where cloned working copies are stored (one subfolder per repo). Leave blank for the default. Changing it starts a fresh cache in that folder.</p>
+    </div>
+  </div>
+
+  <!-- Main layout -->
+  <div id="main" class="hidden">
+    <!-- File tree -->
+    <aside id="sidebar">
+      <div class="sidebar-head">
+        <span id="repo-label">Files</span>
+        <button id="btn-settings" title="Settings">⚙</button>
+      </div>
+      <div class="file-toolbar">
+        <button id="btn-new-file" title="Create a new file (you'll be asked for its path)">＋ New</button>
+        <button id="btn-upload-file" title="Upload file(s) into the repository">⬆ Upload</button>
+        <input type="file" id="file-upload-input" multiple class="hidden" />
+      </div>
+      <div id="file-tree"></div>
+      <div id="changed-files" class="hidden"></div>
+    </aside>
+
+    <!-- Editor -->
+    <section id="editor-pane">
+      <div id="editor-head">
+        <span id="current-file" class="path">— select an .rst file —</span>
+        <div class="view-toggle">
+          <button data-view="source" class="active">Source</button>
+          <button data-view="split">Split</button>
+          <button data-view="preview">Preview</button>
+        </div>
+      </div>
+
+      <!-- WYSIWYG toolbar -->
+      <div id="toolbar">
+        <button data-act="undo" id="btn-undo" title="Undo (Ctrl/Cmd+Z)" class="hidden">↶</button>
+        <button data-act="redo" id="btn-redo" title="Redo (Ctrl/Cmd+Shift+Z)" class="hidden">↷</button>
+        <span class="sep"></span>
+        <button data-act="h1" title="Section title (=== underline)">H1</button>
+        <button data-act="h2" title="Subsection title (--- underline)">H2</button>
+        <button data-act="h3" title="Subsubsection (~~~ underline)">H3</button>
+        <span class="sep"></span>
+        <button data-act="bold" title="Bold (**text**)"><b>B</b></button>
+        <button data-act="italic" title="Italic (*text*)"><i>I</i></button>
+        <button data-act="code" title="Inline code (``text``)">&lt;/&gt;</button>
+        <button data-act="link" title="Hyperlink">🔗</button>
+        <span class="sep"></span>
+        <button data-act="ul" title="Bulleted list">•</button>
+        <button data-act="ol" title="Numbered list">1.</button>
+        <button data-act="quote" title="Block quote">&gt;</button>
+        <button data-act="note" title="Note directive">note</button>
+        <button data-act="codeblock" title="Literal/code block">{ }</button>
+        <button data-act="image" title="Add a picture (uploads to _static/images)">🖼</button>
+        <span class="sep"></span>
+        <button data-act="gridTable" title="Insert a grid table">table</button>
+        <span class="tb-group" title="Table row/column operations (place the cursor inside a table cell first)">
+          <button data-act="addRowAbove" title="Add a row above the cursor row">+row↑</button>
+          <button data-act="addRowBelow" title="Add a row below the cursor row">+row↓</button>
+          <button data-act="deleteRow" title="Delete the cursor row">−row</button>
+          <button data-act="addColLeft" title="Add a column to the left">+col←</button>
+          <button data-act="addColRight" title="Add a column to the right">+col→</button>
+          <button data-act="deleteCol" title="Delete the cursor column">−col</button>
+        </span>
+        <span class="sep"></span>
+        <label class="autosave-toggle" title="Automatically save when you switch files or after a short pause — prevents losing unsaved edits">
+          <input type="checkbox" id="autosave" /> Autosave
+        </label>
+        <button data-act="save" title="Save (Ctrl/Cmd+S)" class="primary">Save</button>
+      </div>
+
+      <!-- Source + preview -->
+      <div id="editor-body">
+        <div id="source-wrap" class="pane">
+          <textarea id="source" spellcheck="false" placeholder="Select an .rst file to edit…"></textarea>
+        </div>
+        <div id="preview-wrap" class="pane">
+          <div id="toc-box" class="hidden"></div>
+          <div id="warnings" class="hidden"></div>
+          <div id="preview" class="rst-preview"></div>
+        </div>
+        <!-- Overlay shown when a non-text file (image / binary) is opened. -->
+        <div id="file-view" class="hidden"></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Commit / push / PR bar -->
+  <footer id="actionbar" class="hidden">
+    <div class="bar-group">
+      <span id="branch-label" class="mono">branch</span>
+      <span id="dirty-count" class="badge hidden">0 changed</span>
+    </div>
+    <div class="bar-group grow">
+      <input type="text" id="commit-msg" placeholder="Commit message…" />
+    </div>
+    <div class="bar-group">
+      <button id="btn-import" title="Import a docx / html / md file as RST">Import</button>
+      <button id="btn-commit" class="primary">Commit</button>
+      <button id="btn-push">Push</button>
+      <button id="btn-pr">Pull Request</button>
+    </div>
+  </footer>
+</div>
+
+<!-- PR dialog -->
+<div id="pr-dialog" class="dialog hidden">
+  <div class="dialog-body">
+    <h3>Create Pull Request / Merge Request</h3>
+    <p class="pr-hint">For a <b>fork</b>, set the <b>Base repository</b> to the upstream
+      (e.g. <code>opentelekomcloud-docs/test-repo</code>) to open a PR against the
+      original project. The app posts to that repo with <code>head =
+      forkowner:your-branch</code> and <code>base = base-branch</code>. Same-repo PRs
+      post to your own repo with plain branch names.</p>
+    <label>Base repository (the project the PR targets — fork, or upstream)
+      <span class="input-row">
+        <input type="text" id="pr-base-repo" placeholder="opentelekomcloud-docs/test-repo" />
+        <button id="btn-pr-use-upstream" type="button" title="Fill the base repository from the saved upstream">upstream</button>
+      </span>
+    </label>
+    <label>Base branch (destination — the branch the PR merges into, usually the default, e.g. main)
+      <input type="text" id="pr-base" />
+    </label>
+    <label>Head branch (your edits — from your fork) <span id="pr-head" class="mono"></span>
+      <input type="text" id="pr-head-input" />
+    </label>
+    <label>Title
+      <input type="text" id="pr-title" />
+    </label>
+    <label>Description
+      <textarea id="pr-body" rows="6"></textarea>
+    </label>
+    <div class="dialog-actions">
+      <a id="pr-result-link" class="hidden" target="_blank" rel="noopener"></a>
+      <span id="pr-status" class="status"></span>
+      <button id="pr-cancel">Cancel</button>
+      <button id="pr-create" class="primary">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Import dialog -->
+<div id="import-dialog" class="dialog hidden">
+  <div class="dialog-body">
+    <h3>Import documentation</h3>
+    <p class="pr-hint">Convert a <b>.docx</b>, <b>.html</b> or <b>.md</b> file to
+      reStructuredText. Embedded images are saved to <code>_static/images/</code>.
+      Files are written into the chosen documentation folder and staged — review
+      them in the editor before committing.</p>
+    <label>File to import
+      <input type="file" id="imp-file" accept=".docx,.doc,.html,.htm,.md,.markdown" />
+    </label>
+    <label>Documentation folder (under repo root — e.g. umn, api-ref, doc)
+      <span class="input-row">
+        <input type="text" id="imp-folder" placeholder="doc" list="imp-folder-list" />
+        <button id="btn-imp-reload" type="button" title="Re-scan the repo for documentation folders">refresh</button>
+      </span>
+      <datalist id="imp-folder-list"></datalist>
+    </label>
+    <label>Output
+      <select id="imp-mode">
+        <option value="single">Single file</option>
+        <option value="split">Split by chapter (one file per top-level heading + index)</option>
+      </select>
+    </label>
+    <label id="imp-level-row" class="hidden">Heading level to split into files
+      <span class="input-row">
+        <select id="imp-level">
+          <option value="1">1 — one file per top-level chapter (no folders)</option>
+          <option value="2">2 — top chapters become folders with index.rst; their sub-chapters (1.1, 1.2, …) become files</option>
+          <option value="3">3 — split at the 3rd heading level (deeper folders)</option>
+          <option value="4">4 — split at the 4th heading level</option>
+        </select>
+      </span>
+      <span class="imp-level-hint">Chapters *above* the chosen level become folders
+        (each with an <code>index.rst</code> holding its own content + a toctree);
+        chapters *at* the level become the files.</span>
+    </label>
+    <label>File name (single mode) / title (split mode)
+      <input type="text" id="imp-slug" placeholder="e.g. umn-overview" />
+    </label>
+    <div class="dialog-actions">
+      <span id="imp-status" class="status"></span>
+      <button id="imp-cancel">Cancel</button>
+      <button id="imp-import" class="primary">Import</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add picture dialog -->
+<div id="image-dialog" class="dialog hidden">
+  <div class="dialog-body">
+    <h3>Add a picture</h3>
+    <p class="pr-hint">The image is saved next to the current file, in
+      <code>&lt;dir&gt;/_static/images/</code>, and an <code>.. image::</code> (or
+      <code>.. figure::</code>) directive is inserted at the cursor / selection.
+      It shows in the live preview.</p>
+    <label>Image file
+      <input type="file" id="img-file" accept="image/*" />
+    </label>
+    <label>Alt text / caption
+      <input type="text" id="img-alt" placeholder="a description" />
+    </label>
+    <label>Use as a figure (adds a caption) instead of a plain image
+      <input type="checkbox" id="img-figure" />
+    </label>
+    <div class="dialog-actions">
+      <span id="img-status" class="status"></span>
+      <button id="img-cancel">Cancel</button>
+      <button id="img-add" class="primary">Add</button>
+    </div>
+  </div>
+</div>
+
+<!-- Working directory browse dialog -->
+<div id="browse-dialog" class="dialog hidden">
+  <div class="dialog-body">
+    <h3>Choose working directory</h3>
+    <label>Directory
+      <input type="text" id="browse-dir" />
+    </label>
+    <div id="browse-list" class="browse-list"></div>
+    <div class="dialog-actions">
+      <span id="browse-status" class="status"></span>
+      <button id="browse-up" title="Go up one level">↑ Up</button>
+      <button id="browse-cancel">Cancel</button>
+      <button id="browse-pick" class="primary">Use this folder</button>
+    </div>
+  </div>
+</div>
+
+<!-- Existing working-copy choice dialog -->
+<div id="clone-choice-dialog" class="dialog hidden">
+  <div class="dialog-body">
+    <h3>A working copy already exists here</h3>
+    <p id="clone-choice-info" class="pr-hint"></p>
+    <p class="pr-hint">What would you like to do?</p>
+    <div class="dialog-actions">
+      <span id="clone-choice-status" class="status"></span>
+      <button id="clone-choice-cancel">Cancel</button>
+      <button id="clone-choice-reset" title="Discard the local copy and clone fresh from the remote">Reset &amp; re-clone</button>
+      <button id="clone-choice-refetch" class="primary" title="Keep the local copy, fetch the latest and switch to the branch">Re-fetch existing</button>
+    </div>
+  </div>
+</div>
+
+<!-- New file / directory dialog -->
+<div id="new-dialog" class="dialog hidden">
+  <div class="dialog-body">
+    <h3>New file or directory</h3>
+    <label>Path (repo-relative, e.g. <code>umn/source/topic.rst</code>)
+      <input type="text" id="new-path" placeholder="e.g. umn/source/topic.rst" />
+    </label>
+    <label class="check-row">
+      <input type="checkbox" id="new-isdir" />
+      <span>Create as an <b>empty directory</b> (a <code>.gitkeep</code> placeholder is added so git can track it)</span>
+    </label>
+    <p class="pr-hint">A path ending in <code>/</code> is also treated as a
+      directory. The result is staged so you can review before committing.</p>
+    <div class="dialog-actions">
+      <span id="new-status" class="status"></span>
+      <button id="new-cancel">Cancel</button>
+      <button id="new-go" class="primary">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Upload destination dialog -->
+<div id="upload-dialog" class="dialog hidden">
+  <div class="dialog-body">
+    <h3>Upload file(s)</h3>
+    <p class="pr-hint" id="upload-count"></p>
+    <label>Destination folder (repo-relative, e.g. <code>umn/source</code>; blank = repo root)
+      <input type="text" id="upload-dest" placeholder="e.g. umn/source" />
+    </label>
+    <p class="pr-hint">Existing files are not overwritten — a name clash gets a
+      numeric suffix. Files are staged so you can review before committing.</p>
+    <div class="dialog-actions">
+      <span id="upload-status" class="status"></span>
+      <button id="upload-cancel">Cancel</button>
+      <button id="upload-go" class="primary">Upload</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/config_yaml.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>
