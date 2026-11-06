@@ -1,0 +1,45 @@
+name: YAML Validation
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  yaml-checks:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
+
+    - name: Install PyYAML
+      run: pip install 'PyYAML==6.0.3'
+
+    # Parse every YAML file in the repo (workflows, configs, fixtures).
+    # os.walk (not glob('**')) so the hidden .github/workflows/ dir is included
+    # too -- glob's ** skips dot-directories, which is why a naive check found
+    # zero files. safe_load_all handles single- and multi-document files.
+    - name: Validate all YAML files
+      run: |
+        python - <<'EOF'
+        import os, sys
+        import yaml
+        files = []
+        for root, _dirs, names in os.walk('.'):
+            for n in names:
+                if n.endswith(('.yml', '.yaml')):
+                    files.append(os.path.relpath(os.path.join(root, n)))
+        files = sorted(files)
+        if not files:
+            print('no YAML files found')
+            sys.exit(1)
+        for f in files:
+            with open(f, encoding='utf-8') as fh:
+                list(yaml.safe_load_all(fh))
+            print('OK', f)
+        print(f'{len(files)} YAML files valid')
+        EOF

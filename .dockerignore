@@ -1,0 +1,13 @@
+# Keep the Docker build context minimal and free of local state.
+.git
+.venv
+venv/
+__pycache__/
+*.pyc
+work/
+node_modules/
+*.db
+*.log
+.DS_Store
+doc/
+test/

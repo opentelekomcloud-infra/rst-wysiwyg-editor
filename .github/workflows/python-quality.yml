@@ -1,0 +1,63 @@
+name: Python Quality
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  python-checks:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
+
+    - name: Syntax check (compile every module)
+      run: python -m compileall -q src test
+
+    - name: Install ruff
+      run: pip install 'ruff==0.17.4'
+
+    # F = pyflakes (unused imports, undefined names, redefinitions, unused
+    # vars); E9 = runtime/syntax errors. Scoped to real defects so the gate
+    # is green on the current codebase.
+    - name: Lint (ruff F,E9)
+      run: ruff check --select F,E9 src test
+
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
+
+    - name: Install dependencies
+      run: pip install -r src/requirements.txt
+
+    # The import tests (test_e2e.py:312) hard-require pandoc for docx/html/md
+    # -> RST. GitHub's ubuntu runner doesn't ship it, so install it explicitly.
+    - name: Install pandoc
+      run: sudo apt-get update -qq && sudo apt-get install -y -qq pandoc
+
+    # Hermetic end-to-end suite: RST preview, clone (local bare repo + mock
+    # API), edit/commit/push, PR, import, file CRUD.
+    - name: Run e2e suite
+      working-directory: test
+      run: python test_e2e.py
+
+    - name: Run reaper unit test (idle work-dir cleanup)
+      working-directory: test
+      run: python test_reaper.py
+
+    - name: Run JS suites (url parse / tables / tree)
+      run: |
+        node test/test_url_parse.js
+        node test/test_table.js
+        node test/test_tree.js

@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---- rst-wysiwyg-editor ----
+# Local repo-clone cache (work dir of the app)
+work/
+# Runtime state / logs
+*.db
+*.log
+/tmp/

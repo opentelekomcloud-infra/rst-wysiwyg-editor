@@ -1,0 +1,31 @@
+name: JavaScript Quality
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  js-checks:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    # node --check = parse/validate every JS file (no execution).
+    - name: Syntax check (node --check)
+      run: |
+        files=$(find src/static test -name '*.js')
+        [ -n "$files" ] || { echo "no JS files found"; exit 1; }
+        echo "$files" | xargs node --check
+
+    # Pure-logic suites (no server needed).
+    - name: Run JS unit tests
+      run: |
+        node test/test_url_parse.js
+        node test/test_table.js
+        node test/test_tree.js
