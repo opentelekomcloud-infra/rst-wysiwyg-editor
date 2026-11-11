@@ -112,6 +112,11 @@ def _clean_work_root(raw):
 
     Blank / missing -> the app default (RST_WORK_ROOT env or <app>/work).
     Otherwise expand ~ and return an absolute path (created on demand).
+
+    A client-stored override that the server cannot create (e.g. the Docker
+    default "/work" sent from a browser on a non-Docker box) must not crash the
+    endpoint: fall back to the server default (which is always writable) and log
+    a warning, so the app keeps working instead of 500ing on every clone.
     """
     default = os.environ.get(
         "RST_WORK_ROOT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "work")
@@ -121,8 +126,21 @@ def _clean_work_root(raw):
         return default
     p = os.path.expanduser(p)
     p = os.path.normpath(os.path.abspath(p))
-    os.makedirs(p, exist_ok=True)
-    return p
+    try:
+        os.makedirs(p, exist_ok=True)
+        return p
+    except OSError as e:
+        # Only fall back when the override actually differs from the default
+        # (otherwise there is nothing to fall back to).
+        if p != os.path.normpath(os.path.abspath(default)):
+            try:
+                os.makedirs(default, exist_ok=True)
+            except OSError:
+                raise
+            app.logger.warning(
+                "Cannot create work root %r (%s); falling back to %r.", p, e, default)
+            return default
+        raise
 
 
 def _norm_mode(raw):
