@@ -436,6 +436,31 @@ check("import image file on disk", repo.file_exists(img_rel), img_rel)
 rst_pic = repo.read_file("umn/source/pic.rst")
 check("import rst refs _static/images", "/_static/images/" in rst_pic, rst_pic)
 
+# 20b) image whose media file is named ".tmp" (docx keeps the raw media name):
+# the importer must identify it from its magic bytes and store + reference it
+# with the correct extension.
+with tempfile.TemporaryDirectory() as td:
+    with open(td + "/p.tmp", "wb") as f:
+        f.write(png)
+    with open(td + "/i.md", "w") as f:
+        f.write("# Pic\n\n![a pic](p.tmp)\n")
+    subprocess.run(["pandoc", "i.md", "-f", "markdown", "-t", "docx",
+                    "-o", "i.docx"], check=True, cwd=td)
+    tmp_docx = open(td + "/i.docx", "rb").read()
+fs3b = FileStorage(stream=io.BytesIO(tmp_docx), filename="tmpimg.docx")
+r = client.post("/api/import", data={"repo_id": imp_repo, "file": fs3b,
+                                     "doc_folder": "umn", "mode": "single",
+                                     "slug": "tmpimg"})
+d = r.get_json()
+check("import .tmp-image 200", r.status_code == 200 and d.get("imported"), d)
+tmp_img = next((x for x in d.get("images", []) if not x.endswith(".tmp")), None)
+check(".tmp image stored with corrected extension", tmp_img, d.get("images"))
+check("no .tmp left in the image list",
+      not any(x.endswith(".tmp") for x in d.get("images", [])), d.get("images"))
+rst_tmp = repo.read_file("umn/source/tmpimg.rst")
+check("rst references the corrected name",
+      tmp_img and os.path.basename(tmp_img) in rst_tmp, rst_tmp)
+
 # 21) import rejects a bad doc folder name (traversal)
 fs4 = FileStorage(stream=io.BytesIO(docx_bytes), filename="x.docx")
 r = client.post("/api/import", data={"repo_id": imp_repo, "file": fs4,

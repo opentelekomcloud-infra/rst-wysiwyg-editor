@@ -279,6 +279,57 @@ def _normalize_grid_tables(rst_text):
     return "\n".join(out)
 
 
+# Image types recognized from magic bytes, so a file whose extension is wrong
+# (pandoc keeps a docx media's raw name, which can be ".tmp" for what is
+# really a PNG) can be renamed to the extension its content actually has.
+_MAGIC_EXT = (
+    (b"\x89PNG\r\n\x1a\n", ".png"),
+    (b"\xff\xd8\xff", ".jpg"),
+    (b"GIF87a", ".gif"),
+    (b"GIF89a", ".gif"),
+    (b"BM", ".bmp"),
+    (b"II*\x00", ".tiff"),
+    (b"MM\x00*", ".tiff"),
+    (b"\x00\x00\x01\x00", ".ico"),
+)
+# Extensions we already trust (no rename) even if magic sniffing disagrees.
+_KNOWN_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif",
+                    ".webp", ".ico", ".svg", ".emf", ".wmf"}
+
+
+def _correct_image_ext(full_path):
+    """Rename *full_path* to its real extension if magic bytes disagree with
+    the name; return the (possibly new) basename.
+
+    Only files whose current extension is NOT already a known image format
+    are touched, so e.g. a genuine ".emf" or a ".svg" (no magic we sniff) is
+    never renamed. On a name collision a numeric suffix is added.
+    """
+    base, ext = os.path.splitext(os.path.basename(full_path))
+    ext = ext.lower()
+    if ext in _KNOWN_IMAGE_EXT:
+        return os.path.basename(full_path)
+    with open(full_path, "rb") as fh:
+        head = fh.read(16)
+    new_ext = None
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        new_ext = ".webp"
+    else:
+        for magic, e in _MAGIC_EXT:
+            if head[:len(magic)] == magic:
+                new_ext = e
+                break
+    if not new_ext:
+        return os.path.basename(full_path)
+    dest = os.path.join(os.path.dirname(full_path), base + new_ext)
+    i = 1
+    while os.path.exists(dest):
+        dest = os.path.join(os.path.dirname(full_path), f"{base}{i}" + new_ext)
+        i += 1
+    os.replace(full_path, dest)
+    return os.path.basename(dest)
+
+
 def _build_image_mapping(fmt, media_dir, images_dir):
     """Return {reference_in_rst: basename_in_static}.
 
@@ -288,6 +339,9 @@ def _build_image_mapping(fmt, media_dir, images_dir):
             copied to media_dir/<hash>.<ext> -> map that ref to its basename.
     We map every image file found under media_dir to its basename, keyed both by
     the RST reference form and the on-disk path, so _rewrite_images can match.
+    A file whose extension is wrong for its content (e.g. a PNG named "*.tmp")
+    is first renamed to its real extension, and every reference (RST path and
+    the returned image list) uses the corrected name.
     """
     mapping = {}
     for root, _dirs, files in os.walk(media_dir):
@@ -295,9 +349,10 @@ def _build_image_mapping(fmt, media_dir, images_dir):
             full = os.path.join(root, f)
             dest = os.path.join(images_dir, f)
             shutil.copy2(full, dest)
+            name = _correct_image_ext(dest)
             # key by the basename (what pandoc's ref resolves to) and the full path
-            mapping[f] = f
-            mapping[full] = f
+            mapping[f] = name
+            mapping[full] = name
     return mapping
 
 

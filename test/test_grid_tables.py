@@ -130,6 +130,58 @@ out = importer._normalize_grid_tables(aligned)
 check("normalize is a no-op on aligned tables",
       out == aligned, out)
 
+
+# --------------------------------------------------------------------- case 5
+# _correct_image_ext: files whose extension is wrong for their content
+# (pandoc keeps a docx media's raw name, which can be ".tmp" for a real
+# PNG) are renamed to the extension their magic bytes identify; files with
+# a trusted extension (incl. .emf) are never renamed.
+
+import tempfile
+
+PNG1 = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000a49444154789c63f8ffff3f0005fe02fea535580000000049454e44ae426082")
+
+with tempfile.TemporaryDirectory() as td:
+    # PNG stored as .tmp -> renamed to .png
+    p1 = os.path.join(td, "image1.tmp")
+    open(p1, "wb").write(PNG1)
+    r1 = importer._correct_image_ext(p1)
+    check("png-in-tmp renamed to .png", r1 == "image1.png", r1)
+    check("renamed file exists on disk",
+          os.path.isfile(os.path.join(td, "image1.png")))
+
+    # PNG already named .png -> untouched
+    p2 = os.path.join(td, "image2.png")
+    open(p2, "wb").write(PNG1)
+    check("png-in-png unchanged",
+          importer._correct_image_ext(p2) == "image2.png")
+
+    # genuine EMF (01 00 00 00 header) named .emf -> untouched
+    p3 = os.path.join(td, "logo.emf")
+    open(p3, "wb").write(b"\x01\x00\x00\x00" + b"\x00" * 32)
+    check("emf untouched",
+          importer._correct_image_ext(p3) == "logo.emf")
+
+    # .svg (no sniffed magic) -> untouched
+    p4 = os.path.join(td, "chart.svg")
+    open(p4, "wb").write(b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+    check("svg untouched",
+          importer._correct_image_ext(p4) == "chart.svg")
+
+    # unidentifiable content with unknown ext -> untouched (kept as-is)
+    p5 = os.path.join(td, "mystery.bin")
+    open(p5, "wb").write(b"\xde\xad\xbe\xef")
+    check("unknown content untouched",
+          importer._correct_image_ext(p5) == "mystery.bin")
+
+    # collision: image1.png already exists -> image11.png
+    p6 = os.path.join(td, "image1.tmp")
+    open(p6, "wb").write(PNG1)
+    r6 = importer._correct_image_ext(p6)
+    check("collision gets numeric suffix", r6 == "image11.png", r6)
+
 print()
 print(f"{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
