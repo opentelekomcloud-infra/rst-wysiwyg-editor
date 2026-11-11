@@ -389,10 +389,14 @@ check("split_level=2 leaf chapter stays a file",
 check("split_level=2 index has toctree",
       ".. toctree::" in repo.read_file("umn/source/chapter-one/index.rst"),
       repo.read_file("umn/source/chapter-one/index.rst"))
-# Root index references the chapter as a folder (no .rst extension).
+# Root index references the chapter as a folder ("chapter-one/index"), not a .rst.
 root_idx = repo.read_file("umn/source/index.rst")
-check("split_level=2 root index references folder",
-      "chapter-one" in root_idx and "chapter-one.rst" not in root_idx, root_idx)
+check("split_level=2 root index references folder as /index",
+      "chapter-one/index" in root_idx and "chapter-one.rst" not in root_idx, root_idx)
+# Folder index references its leaf sub-chapters as .rst files.
+ch1_idx = repo.read_file("umn/source/chapter-one/index.rst")
+check("split_level=2 folder index references leaf .rst",
+      "sub-a.rst" in ch1_idx and "sub-a/index" not in ch1_idx, ch1_idx)
 
 # 19) import SINGLE mode (no image)
 fs2 = FileStorage(stream=io.BytesIO(docx_bytes), filename="single.docx")

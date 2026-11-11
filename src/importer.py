@@ -537,13 +537,13 @@ def split_by_levels(rst_text, level=1, title="Documentation"):
         return node["level"] < level and any(
             c["level"] >= 1 for c in node["children"])
 
-    # Top-level index: a chapter is referenced as a folder (no extension) when
+    # Top-level index: a chapter is referenced as a folder ("{stem}/index") when
     # it is rendered as one, otherwise as a ``.rst`` file.
     top_items = []
     for ch in root["children"]:
         if ch["level"] >= 1:
             if is_folder(ch):
-                top_items.append("   " + ch["stem"])
+                top_items.append("   " + ch["stem"] + "/index")
             else:
                 top_items.append("   " + ch["stem"] + ".rst")
 
@@ -563,7 +563,7 @@ def split_by_levels(rst_text, level=1, title="Documentation"):
     # a chapter rendered as a file goes at ``<prefix>/<stem>.rst``.
     def render(node, prefix):
         if is_folder(node):
-            files[prefix + node["stem"] + "/index.rst"] = _index_content(node)
+            files[prefix + node["stem"] + "/index.rst"] = _index_content(node, is_folder)
             for ch in node["children"]:
                 if ch["level"] >= 1:
                     render(ch, prefix + node["stem"] + "/")
@@ -617,7 +617,7 @@ def _render_section(node):
     return out
 
 
-def _index_content(node):
+def _index_content(node, is_folder):
     """An index.rst for a folder chapter: own content + a toctree of children."""
     parts = []
     t = node["title"]
@@ -630,8 +630,8 @@ def _index_content(node):
     items = []
     for sub in node["children"]:
         if sub["level"] >= 1:
-            if any(c["level"] >= 1 for c in sub["children"]):
-                items.append("   " + sub["stem"])
+            if is_folder(sub):
+                items.append("   " + sub["stem"] + "/index")
             else:
                 items.append("   " + sub["stem"] + ".rst")
     if items:
