@@ -481,6 +481,34 @@ if ch2:
     check("chapter-two does NOT carry the trailing image defs",
           "image::" not in c2, c2)
 
+# 21d) split: the top-level index.rst can carry the document's preamble —
+# the body of the (unwrapped) title heading — and if that preamble
+# references an image (e.g. a docx cover page), the substitution
+# definitions must be prepended to index.rst as well.
+with tempfile.TemporaryDirectory() as td:
+    with open(td + "/p.png", "wb") as f:
+        f.write(png)
+    with open(td + "/i.md", "w") as f:
+        f.write("# Cover\n\nCover page with ![pic](p.png).\n\n"
+                "## Chapter One\n\ntext one\n\n"
+                "## Chapter Two\n\ntext two\n")
+    subprocess.run(["pandoc", "i.md", "-f", "markdown", "-t", "docx",
+                    "-o", "i.docx"], check=True, cwd=td)
+    cover_docx = open(td + "/i.docx", "rb").read()
+fs6 = FileStorage(stream=io.BytesIO(cover_docx), filename="cover.docx")
+r = client.post("/api/import", data={"repo_id": imp_repo, "file": fs6,
+                                     "doc_folder": "umn", "mode": "split",
+                                     "split_level": 1, "title": "Cover Doc"})
+d = r.get_json()
+check("split-with-cover import 200", r.status_code == 200 and d.get("imported"), d)
+cover_idx = next((x for x in d.get("files", []) if x.endswith("source/index.rst")), None)
+check("split wrote index.rst (cover)", cover_idx, d.get("files"))
+if cover_idx:
+    ci = repo.read_file(cover_idx)
+    check("index.rst defines its cover image",
+          ".. |pic| image::" in ci and "/_static/images/" in ci, ci)
+    check("index.rst still references the cover image", "|pic|" in ci, ci)
+
 # 21b) over-long chapter titles -> truncated, unique stems (no E2ENAMETOOLONG)
 long_a = ("The information in this document is subject to change without notice "
           "every effort has been made in the preparation of this document to "

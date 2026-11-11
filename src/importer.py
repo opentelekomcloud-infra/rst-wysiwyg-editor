@@ -658,10 +658,10 @@ def split_by_levels(rst_text, level=1, title="Documentation"):
             render(ch, "")
     # Make each generated file self-contained: RST substitutions only resolve
     # within the file that defines them, so prepend the image definitions each
-    # file actually references (the toctree-only index.rst gets none).
+    # file actually references. The top-level index.rst can carry the
+    # document's preamble (e.g. a docx cover page with images) when the title
+    # sits above the first level-1 heading, so it needs the same treatment.
     for path in list(files):
-        if path == "index.rst":
-            continue
         files[path] = _prepend_defs(files[path], _used_defs(files[path], image_defs))
     return files
 
