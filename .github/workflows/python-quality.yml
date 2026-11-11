@@ -56,6 +56,11 @@ jobs:
       working-directory: test
       run: python test_reaper.py
 
+    # Grid-table alignment after image-substitution renaming (docutils-based).
+    - name: Run grid-table unit test
+      working-directory: test
+      run: python test_grid_tables.py
+
     - name: Run JS suites (url parse / tables / tree)
       run: |
         node test/test_url_parse.js

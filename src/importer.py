@@ -154,6 +154,10 @@ def convert_to_rst(src_bytes, fmt, media_dir, source_dir):
     # images; a backslash in a substitution name is eaten by RST's escape
     # handling, so the reference never matches the definition).
     new_rst = _sanitize_subst_names(new_rst)
+    # Renaming a substitution shortens the name, which un-aligns any
+    # grid-table rows that embedded it (pandoc sized the borders to the
+    # original name). Re-align so the tables parse cleanly.
+    new_rst = _normalize_grid_tables(new_rst)
     return new_rst, sorted(set(mapping.values()))
 
 
@@ -164,9 +168,11 @@ def _sanitize_subst_names(rst_text):
     (e.g. ``C:\\c42bb3dc…``). RST's escape handling consumes a backslash in a
     substitution name (``|C:\\abc|`` parses as ``C:abc``), so the definition
     and its reference silently stop matching and the image never renders.
-    Any name containing a backslash is renamed to a compact, collision-free
-    form (``img1``, ``img2``, … in first-appearance order) in BOTH the
-    definitions and the references, so they always agree.
+    Any name containing a backslash is renamed to a collision-free form
+    (``img1``, ``img2``, … in first-appearance order) in BOTH the definitions
+    and the references, so they always agree. The rename shrinks the name,
+    so it also un-aligns any grid-table rows that embedded the original
+    name — :func:`_normalize_grid_tables` repairs that.
     """
     names = []
     for m in re.finditer(r"\.\.\s+\|([^|]+)\|\s+image::", rst_text):
@@ -177,10 +183,10 @@ def _sanitize_subst_names(rst_text):
         return rst_text
     new_names = {}
     for i, name in enumerate(names, 1):
-        candidate = f"img{i}"
-        while candidate in new_names.values():
-            candidate += "x"
-        new_names[name] = candidate
+        base = f"img{i}"
+        while base in new_names.values():
+            base += "x"
+        new_names[name] = base
 
     # A reference or definition name is the text between the surrounding
     # pipes. Rewrite only names that are on the unsafe list, leaving every
@@ -194,6 +200,83 @@ def _sanitize_subst_names(rst_text):
     # Match |name| where name contains a backslash (the only unsafe char we
     # rename); a plain [^|]* would also catch table cells.
     return re.sub(r"\|((?:(?!\|).)*\\(?:(?!\|).)*)\|", _sub, rst_text)
+
+
+def _normalize_grid_tables(rst_text):
+    """Re-align grid-table rows that lost their right border after a
+    substitution rename shortened the cell content.
+
+    Pandoc sizes grid-table borders to the original cell content. After
+    :func:`_sanitize_subst_names` rewrites a name to a shorter form, the
+    rows that embedded it become shorter than the borders, and docutils
+    reports ``Malformed table: right border not aligned or missing``.
+
+    A row is re-alignable only if it is *structurally complete*: every
+    inner border column (the ``+`` positions in the top border, minus the
+    rightmost) already holds a ``|``. Rows that lack inner borders (merged
+    cells in the source table) are left untouched — docutils is already
+    lenient about those being shorter than the borders, and forcing a
+    right border onto them turns a lenient parse into a hard error.
+    """
+    lines = rst_text.split("\n")
+    out = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        if lines[i].startswith("+"):
+            j = i
+            while j < n:
+                l = lines[j]
+                if l == "":
+                    break
+                if l.startswith("+") or l.startswith("|"):
+                    j += 1
+                else:
+                    break
+            block = lines[i:j]
+            if not block:
+                i = j
+                continue
+            # Border columns = `+` positions present in every `+` row of
+            # the block (their intersection is the true column set).
+            plus_cols = None
+            for l in block:
+                if l.startswith("+"):
+                    cols = {k for k, c in enumerate(l) if c == "+"}
+                    plus_cols = cols if plus_cols is None else (plus_cols & cols)
+            w = max(len(l) for l in block)
+            if not plus_cols:
+                out.extend(block)
+                i = j
+                continue
+            inner_cols = sorted(c for c in plus_cols if c < w - 1)
+            fixed = []
+            for l in block:
+                if l.startswith("+"):
+                    if len(l) < w:
+                        fixed.append(l.ljust(w, "-"))
+                    else:
+                        fixed.append(l)
+                elif l.startswith("|"):
+                    structurally_ok = all(
+                        k < len(l) and l[k] == "|" for k in inner_cols
+                    )
+                    if structurally_ok and len(l) < w:
+                        if l.rstrip().endswith("|"):
+                            fixed.append(l[:-1] + " " * (w - len(l)) + "|")
+                        else:
+                            fixed.append(l + " " * (w - len(l) - 1) + "|")
+                    else:
+                        fixed.append(l)
+                else:
+                    # Continuation row (text-only, no left border) — pad if short.
+                    fixed.append(l.ljust(w) if len(l) < w else l)
+            out.extend(fixed)
+            i = j
+        else:
+            out.append(lines[i])
+            i += 1
+    return "\n".join(out)
 
 
 def _build_image_mapping(fmt, media_dir, images_dir):
