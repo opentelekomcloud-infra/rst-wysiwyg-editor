@@ -438,6 +438,45 @@ r = client.post("/api/import", data={"repo_id": imp_repo, "file": fs4,
                                      "doc_folder": "../../evil", "mode": "single"})
 check("import rejects traversal folder", r.status_code == 400, r.get_json())
 
+# 21c) split by chapters: image substitution defs follow the chapter that
+# references them (pandoc collects the ".. |name| image::" defs at the end of
+# the doc, so a naive split traps them in the LAST chapter and every |name|
+# elsewhere renders as literal text).
+with tempfile.TemporaryDirectory() as td:
+    with open(td + "/p.png", "wb") as f:
+        f.write(png)
+    with open(td + "/i.md", "w") as f:
+        f.write("# Chapter One\n\nintro text\n\n![pic](p.png)\n\n"
+                "## Sub One\n\nmore sub text\n\n"
+                "# Chapter Two\n\nsecond chapter text\n")
+    subprocess.run(["pandoc", "i.md", "-f", "markdown", "-t", "docx",
+                    "-o", "i.docx"], check=True, cwd=td)
+    img_md_docx = open(td + "/i.docx", "rb").read()
+fs5 = FileStorage(stream=io.BytesIO(img_md_docx), filename="splitpic.docx")
+r = client.post("/api/import", data={"repo_id": imp_repo, "file": fs5,
+                                     "doc_folder": "umn", "mode": "split",
+                                     "split_level": 2, "title": "Split Doc"})
+d = r.get_json()
+check("split-with-image import 200", r.status_code == 200 and d.get("imported"), d)
+# At split_level=2, "Chapter One" has a sub-chapter -> it becomes a folder
+# (chapter-one/index.rst + chapter-one/sub-one.rst); Chapter Two is a file.
+ch1 = next((x for x in d.get("files", []) if x.endswith("chapter-one/index.rst")), None)
+ch2 = next((x for x in d.get("files", []) if x.endswith("chapter-two.rst")), None)
+check("split wrote chapter-one/index.rst", ch1, d.get("files"))
+check("split wrote chapter-two.rst", ch2, d.get("files"))
+if ch1:
+    c1 = repo.read_file(ch1)
+    check("chapter-one defines its image",
+          ".. |pic| image::" in c1 and "/_static/images/" in c1, c1)
+    check("chapter-one still references the image", "|pic|" in c1, c1)
+    check("the image file was extracted",
+          any(x.startswith("umn/source/_static/images/") for x in d.get("images", [])),
+          d.get("images"))
+if ch2:
+    c2 = repo.read_file(ch2)
+    check("chapter-two does NOT carry the trailing image defs",
+          "image::" not in c2, c2)
+
 # 21b) over-long chapter titles -> truncated, unique stems (no E2ENAMETOOLONG)
 long_a = ("The information in this document is subject to change without notice "
           "every effort has been made in the preparation of this document to "
