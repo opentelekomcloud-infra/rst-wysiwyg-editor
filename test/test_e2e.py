@@ -389,10 +389,14 @@ check("split_level=2 leaf chapter stays a file",
 check("split_level=2 index has toctree",
       ".. toctree::" in repo.read_file("umn/source/chapter-one/index.rst"),
       repo.read_file("umn/source/chapter-one/index.rst"))
-# Root index references the chapter as a folder (no .rst extension).
+# Root index references the chapter as a folder ("chapter-one/index"), not a .rst.
 root_idx = repo.read_file("umn/source/index.rst")
-check("split_level=2 root index references folder",
-      "chapter-one" in root_idx and "chapter-one.rst" not in root_idx, root_idx)
+check("split_level=2 root index references folder as /index",
+      "chapter-one/index" in root_idx and "chapter-one.rst" not in root_idx, root_idx)
+# Folder index references its leaf sub-chapters as .rst files.
+ch1_idx = repo.read_file("umn/source/chapter-one/index.rst")
+check("split_level=2 folder index references leaf .rst",
+      "sub-a.rst" in ch1_idx and "sub-a/index" not in ch1_idx, ch1_idx)
 
 # 19) import SINGLE mode (no image)
 fs2 = FileStorage(stream=io.BytesIO(docx_bytes), filename="single.docx")
@@ -432,11 +436,130 @@ check("import image file on disk", repo.file_exists(img_rel), img_rel)
 rst_pic = repo.read_file("umn/source/pic.rst")
 check("import rst refs _static/images", "/_static/images/" in rst_pic, rst_pic)
 
+# 20b) image whose media file is named ".tmp" (docx keeps the raw media name):
+# the importer must identify it from its magic bytes and store + reference it
+# with the correct extension. Fixture: build a docx with a real .png via
+# pandoc, then rename the embedded media to *.tmp inside the zip (and update
+# [Content_Types].xml + the rels target to match) — a pandoc-CLI markdown
+# build cannot embed a .tmp image (pandoc refuses unknown extensions), so the
+# package must be rewritten directly.
+def _docx_with_tmp_media(td, png):
+    import zipfile
+    with open(td + "/p.png", "wb") as f:
+        f.write(png)
+    with open(td + "/i.md", "w") as f:
+        f.write("# Pic\n\n![a pic](p.png)\n")
+    subprocess.run(["pandoc", "i.md", "-f", "markdown", "-t", "docx",
+                    "-o", "i.docx"], check=True, cwd=td)
+    zin = zipfile.ZipFile(td + "/i.docx")
+    src = next(n for n in zin.namelist() if n.startswith("word/media/"))
+    base = os.path.basename(src)
+    tmp_base = os.path.splitext(base)[0] + ".tmp"
+    out = zipfile.ZipFile(td + "/i2.docx", "w", zipfile.ZIP_DEFLATED)
+    for item in zin.namelist():
+        data = zin.read(item)
+        if item == "[Content_Types].xml":
+            data = data.decode("utf-8").replace(
+                'Extension="png" ContentType="image/png"',
+                'Extension="tmp" ContentType="image/png"').encode("utf-8")
+        elif item == "word/_rels/document.xml.rels":
+            data = data.decode("utf-8").replace(
+                'Target="media/' + base + '"',
+                'Target="media/' + tmp_base + '"').encode("utf-8")
+        if item == src:
+            item = "word/media/" + tmp_base
+        out.writestr(item, data)
+    out.close()
+    return open(td + "/i2.docx", "rb").read()
+
+with tempfile.TemporaryDirectory() as td:
+    tmp_docx = _docx_with_tmp_media(td, png)
+fs3b = FileStorage(stream=io.BytesIO(tmp_docx), filename="tmpimg.docx")
+r = client.post("/api/import", data={"repo_id": imp_repo, "file": fs3b,
+                                     "doc_folder": "umn", "mode": "single",
+                                     "slug": "tmpimg"})
+d = r.get_json()
+check("import .tmp-image 200", r.status_code == 200 and d.get("imported"), d)
+tmp_img = next((x for x in d.get("images", []) if not x.endswith(".tmp")), None)
+check(".tmp image stored with corrected extension", tmp_img, d.get("images"))
+check("no .tmp left in the image list",
+      not any(x.endswith(".tmp") for x in d.get("images", [])), d.get("images"))
+rst_tmp = repo.read_file("umn/source/tmpimg.rst")
+check("rst references the corrected name",
+      tmp_img and os.path.basename(tmp_img) in rst_tmp, rst_tmp)
+
 # 21) import rejects a bad doc folder name (traversal)
 fs4 = FileStorage(stream=io.BytesIO(docx_bytes), filename="x.docx")
 r = client.post("/api/import", data={"repo_id": imp_repo, "file": fs4,
                                      "doc_folder": "../../evil", "mode": "single"})
 check("import rejects traversal folder", r.status_code == 400, r.get_json())
+
+# 21c) split by chapters: image substitution defs follow the chapter that
+# references them (pandoc collects the ".. |name| image::" defs at the end of
+# the doc, so a naive split traps them in the LAST chapter and every |name|
+# elsewhere renders as literal text).
+with tempfile.TemporaryDirectory() as td:
+    with open(td + "/p.png", "wb") as f:
+        f.write(png)
+    with open(td + "/i.md", "w") as f:
+        f.write("# Chapter One\n\nintro text\n\n![pic](p.png)\n\n"
+                "## Sub One\n\nmore sub text\n\n"
+                "# Chapter Two\n\nsecond chapter text\n")
+    subprocess.run(["pandoc", "i.md", "-f", "markdown", "-t", "docx",
+                    "-o", "i.docx"], check=True, cwd=td)
+    img_md_docx = open(td + "/i.docx", "rb").read()
+fs5 = FileStorage(stream=io.BytesIO(img_md_docx), filename="splitpic.docx")
+r = client.post("/api/import", data={"repo_id": imp_repo, "file": fs5,
+                                     "doc_folder": "umn", "mode": "split",
+                                     "split_level": 2, "title": "Split Doc"})
+d = r.get_json()
+check("split-with-image import 200", r.status_code == 200 and d.get("imported"), d)
+# At split_level=2, "Chapter One" has a sub-chapter -> it becomes a folder
+# (chapter-one/index.rst + chapter-one/sub-one.rst); Chapter Two is a file.
+ch1 = next((x for x in d.get("files", []) if x.endswith("chapter-one/index.rst")), None)
+ch2 = next((x for x in d.get("files", []) if x.endswith("chapter-two.rst")), None)
+check("split wrote chapter-one/index.rst", ch1, d.get("files"))
+check("split wrote chapter-two.rst", ch2, d.get("files"))
+if ch1:
+    c1 = repo.read_file(ch1)
+    check("chapter-one defines its image",
+          ".. |pic| image::" in c1 and "/_static/images/" in c1, c1)
+    check("chapter-one still references the image", "|pic|" in c1, c1)
+    check("the image file was extracted",
+          any(x.startswith("umn/source/_static/images/") for x in d.get("images", [])),
+          d.get("images"))
+if ch2:
+    c2 = repo.read_file(ch2)
+    check("chapter-two does NOT carry the trailing image defs",
+          "image::" not in c2, c2)
+
+# 21d) split: the top-level index.rst can carry the document's preamble —
+# the body of the (unwrapped) title heading — and if that preamble
+# references an image (e.g. a docx cover page), the substitution
+# definitions must be prepended to index.rst as well.
+with tempfile.TemporaryDirectory() as td:
+    with open(td + "/p.png", "wb") as f:
+        f.write(png)
+    with open(td + "/i.md", "w") as f:
+        f.write("# Cover\n\nCover page with ![pic](p.png).\n\n"
+                "## Chapter One\n\ntext one\n\n"
+                "## Chapter Two\n\ntext two\n")
+    subprocess.run(["pandoc", "i.md", "-f", "markdown", "-t", "docx",
+                    "-o", "i.docx"], check=True, cwd=td)
+    cover_docx = open(td + "/i.docx", "rb").read()
+fs6 = FileStorage(stream=io.BytesIO(cover_docx), filename="cover.docx")
+r = client.post("/api/import", data={"repo_id": imp_repo, "file": fs6,
+                                     "doc_folder": "umn", "mode": "split",
+                                     "split_level": 1, "title": "Cover Doc"})
+d = r.get_json()
+check("split-with-cover import 200", r.status_code == 200 and d.get("imported"), d)
+cover_idx = next((x for x in d.get("files", []) if x.endswith("source/index.rst")), None)
+check("split wrote index.rst (cover)", cover_idx, d.get("files"))
+if cover_idx:
+    ci = repo.read_file(cover_idx)
+    check("index.rst defines its cover image",
+          ".. |pic| image::" in ci and "/_static/images/" in ci, ci)
+    check("index.rst still references the cover image", "|pic|" in ci, ci)
 
 # 21b) over-long chapter titles -> truncated, unique stems (no E2ENAMETOOLONG)
 long_a = ("The information in this document is subject to change without notice "
@@ -584,6 +707,23 @@ check("work-root endpoint", r.status_code == 200 and os.path.isabs(r.get_json()[
 # work_root is a valid config key (client-side now; no server persistence).
 import config_io as _ci
 check("work_root in CONFIG_KEYS", "work_root" in _ci.CONFIG_KEYS)
+
+# Reviewer finding #2: an override that EXISTS but is NOT writable (e.g. a
+# root-owned /work left by an earlier run, a read-only mount) must fall back to
+# the server default rather than 500ing. os.makedirs(exist_ok=True) succeeds on
+# such a dir, so the probe must actually try to write.
+from app import _clean_work_root as _cwr
+_ro = "/tmp/rsttest_ro_%d" % os.getpid()
+shutil.rmtree(_ro, ignore_errors=True)
+os.makedirs(_ro, exist_ok=True)
+os.chmod(_ro, 0o555)
+try:
+    fb = _cwr(_ro)
+    check("work_root: read-only override falls back to default",
+          os.path.isabs(fb) and fb != os.path.normpath(_ro), fb)
+finally:
+    os.chmod(_ro, 0o755)
+    shutil.rmtree(_ro, ignore_errors=True)
 
 # ----------------------------------------------------------------------
 # 26) Robustness: a non-string / object 'mode' must NOT 500 the endpoint.

@@ -13,6 +13,16 @@ Layout produced (matches the project's documentation rules):
 
 Image references inside the generated RST are rewritten to ``/_static/images/...``
 so they resolve under Sphinx's static handling.
+
+Pandoc represents docx images as RST *substitution definitions* — a block of
+``.. |name| image:: /_static/images/x.png`` lines that it collects at the END of
+the document, with the chapter bodies referring to them as ``|name|``. Because
+an RST substitution only resolves *within the file that defines it*, splitting
+the document by chapter would trap every definition in the last chapter file
+and leave ``|name|`` in the other chapters as literal, unrendered text. The
+splitter therefore extracts those definitions up front and re-inserts each one
+into exactly the file(s) that reference it, so every chapter file is
+self-contained.
 """
 import os
 import re
@@ -139,7 +149,193 @@ def convert_to_rst(src_bytes, fmt, media_dir, source_dir):
 
     # Rewrite references (docx uses rIdN; markdown uses original names).
     new_rst = _rewrite_images(rst_text, mapping, fmt)
+    # Sanitize image substitution *names* that are not RST-safe (pandoc uses
+    # the original Windows image path, e.g. "C:\c42bb3dc…", for some docx
+    # images; a backslash in a substitution name is eaten by RST's escape
+    # handling, so the reference never matches the definition).
+    new_rst = _sanitize_subst_names(new_rst)
+    # Renaming a substitution shortens the name, which un-aligns any
+    # grid-table rows that embedded it (pandoc sized the borders to the
+    # original name). Re-align so the tables parse cleanly.
+    new_rst = _normalize_grid_tables(new_rst)
     return new_rst, sorted(set(mapping.values()))
+
+
+def _sanitize_subst_names(rst_text):
+    """Make image substitution *names* RST-safe, consistently.
+
+    Pandoc names some docx images after their original Windows path
+    (e.g. ``C:\\c42bb3dc…``). RST's escape handling consumes a backslash in a
+    substitution name (``|C:\\abc|`` parses as ``C:abc``), so the definition
+    and its reference silently stop matching and the image never renders.
+    Any name containing a backslash is renamed to a collision-free form
+    (``img1``, ``img2``, … in first-appearance order) in BOTH the definitions
+    and the references, so they always agree.
+
+    The replacement is **padded with underscores to the original name's
+    length**. RST strips trailing/interior whitespace from substitution names
+    (a space-padded name is itself a "malformed substitution definition"), so
+    a non-space filler is used. Keeping the byte length identical is what
+    actually matters: pandoc sizes grid-table borders to the *original* cell
+    content, so a shorter name would shrink the row and misalign the ``|`` /
+    ``+`` borders → ``Malformed table``. A same-length name changes no width,
+    so no table can break (and :func:`_normalize_grid_tables` stays a no-op
+    safety net).
+    """
+    names = []
+    for m in re.finditer(r"\.\.\s+\|([^|]+)\|\s+image::", rst_text):
+        name = m.group(1).strip()
+        if "\\" in name and name not in names:
+            names.append(name)
+    if not names:
+        return rst_text
+    new_names = {}
+    for i, name in enumerate(names, 1):
+        base = f"img{i}"
+        while base in new_names.values():
+            base += "x"
+        new_names[name] = base + "_" * (len(name) - len(base))
+
+    # A reference or definition name is the text between the surrounding
+    # pipes. Rewrite only names that are on the unsafe list, leaving every
+    # other ``|…|`` (table cells, inline literals) untouched.
+    def _sub(m):
+        name = m.group(1)
+        if name in new_names:
+            return "|" + new_names[name] + "|"
+        return m.group(0)
+
+    # Match |name| where name contains a backslash (the only unsafe char we
+    # rename); a plain [^|]* would also catch table cells.
+    return re.sub(r"\|((?:(?!\|).)*\\(?:(?!\|).)*)\|", _sub, rst_text)
+
+
+def _normalize_grid_tables(rst_text):
+    """Re-align grid-table rows that lost their right border after a
+    substitution rename shortened the cell content.
+
+    Pandoc sizes grid-table borders to the original cell content. After
+    :func:`_sanitize_subst_names` rewrites a name to a shorter form, the
+    rows that embedded it become shorter than the borders, and docutils
+    reports ``Malformed table: right border not aligned or missing``.
+
+    A row is re-alignable only if it is *structurally complete*: every
+    inner border column (the ``+`` positions in the top border, minus the
+    rightmost) already holds a ``|``. Rows that lack inner borders (merged
+    cells in the source table) are left untouched — docutils is already
+    lenient about those being shorter than the borders, and forcing a
+    right border onto them turns a lenient parse into a hard error.
+    """
+    lines = rst_text.split("\n")
+    out = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        if lines[i].startswith("+"):
+            j = i
+            while j < n:
+                l = lines[j]
+                if l == "":
+                    break
+                if l.startswith("+") or l.startswith("|"):
+                    j += 1
+                else:
+                    break
+            block = lines[i:j]
+            if not block:
+                i = j
+                continue
+            # Border columns = `+` positions present in every `+` row of
+            # the block (their intersection is the true column set).
+            plus_cols = None
+            for l in block:
+                if l.startswith("+"):
+                    cols = {k for k, c in enumerate(l) if c == "+"}
+                    plus_cols = cols if plus_cols is None else (plus_cols & cols)
+            w = max(len(l) for l in block)
+            if not plus_cols:
+                out.extend(block)
+                i = j
+                continue
+            inner_cols = sorted(c for c in plus_cols if c < w - 1)
+            fixed = []
+            for l in block:
+                if l.startswith("+"):
+                    if len(l) < w:
+                        fixed.append(l.ljust(w, "-"))
+                    else:
+                        fixed.append(l)
+                elif l.startswith("|"):
+                    structurally_ok = all(
+                        k < len(l) and l[k] == "|" for k in inner_cols
+                    )
+                    if structurally_ok and len(l) < w:
+                        if l.rstrip().endswith("|"):
+                            fixed.append(l[:-1] + " " * (w - len(l)) + "|")
+                        else:
+                            fixed.append(l + " " * (w - len(l) - 1) + "|")
+                    else:
+                        fixed.append(l)
+                else:
+                    # Continuation row (text-only, no left border) — pad if short.
+                    fixed.append(l.ljust(w) if len(l) < w else l)
+            out.extend(fixed)
+            i = j
+        else:
+            out.append(lines[i])
+            i += 1
+    return "\n".join(out)
+
+
+# Image types recognized from magic bytes, so a file whose extension is wrong
+# (pandoc keeps a docx media's raw name, which can be ".tmp" for what is
+# really a PNG) can be renamed to the extension its content actually has.
+_MAGIC_EXT = (
+    (b"\x89PNG\r\n\x1a\n", ".png"),
+    (b"\xff\xd8\xff", ".jpg"),
+    (b"GIF87a", ".gif"),
+    (b"GIF89a", ".gif"),
+    (b"BM", ".bmp"),
+    (b"II*\x00", ".tiff"),
+    (b"MM\x00*", ".tiff"),
+    (b"\x00\x00\x01\x00", ".ico"),
+)
+# Extensions we already trust (no rename) even if magic sniffing disagrees.
+_KNOWN_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif",
+                    ".webp", ".ico", ".svg", ".emf", ".wmf"}
+
+
+def _correct_image_ext(full_path):
+    """Rename *full_path* to its real extension if magic bytes disagree with
+    the name; return the (possibly new) basename.
+
+    Only files whose current extension is NOT already a known image format
+    are touched, so e.g. a genuine ".emf" or a ".svg" (no magic we sniff) is
+    never renamed. On a name collision a numeric suffix is added.
+    """
+    base, ext = os.path.splitext(os.path.basename(full_path))
+    ext = ext.lower()
+    if ext in _KNOWN_IMAGE_EXT:
+        return os.path.basename(full_path)
+    with open(full_path, "rb") as fh:
+        head = fh.read(16)
+    new_ext = None
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        new_ext = ".webp"
+    else:
+        for magic, e in _MAGIC_EXT:
+            if head[:len(magic)] == magic:
+                new_ext = e
+                break
+    if not new_ext:
+        return os.path.basename(full_path)
+    dest = os.path.join(os.path.dirname(full_path), base + new_ext)
+    i = 1
+    while os.path.exists(dest):
+        dest = os.path.join(os.path.dirname(full_path), f"{base}{i}" + new_ext)
+        i += 1
+    os.replace(full_path, dest)
+    return os.path.basename(dest)
 
 
 def _build_image_mapping(fmt, media_dir, images_dir):
@@ -151,6 +347,9 @@ def _build_image_mapping(fmt, media_dir, images_dir):
             copied to media_dir/<hash>.<ext> -> map that ref to its basename.
     We map every image file found under media_dir to its basename, keyed both by
     the RST reference form and the on-disk path, so _rewrite_images can match.
+    A file whose extension is wrong for its content (e.g. a PNG named "*.tmp")
+    is first renamed to its real extension, and every reference (RST path and
+    the returned image list) uses the corrected name.
     """
     mapping = {}
     for root, _dirs, files in os.walk(media_dir):
@@ -158,9 +357,10 @@ def _build_image_mapping(fmt, media_dir, images_dir):
             full = os.path.join(root, f)
             dest = os.path.join(images_dir, f)
             shutil.copy2(full, dest)
+            name = _correct_image_ext(dest)
             # key by the basename (what pandoc's ref resolves to) and the full path
-            mapping[f] = f
-            mapping[full] = f
+            mapping[f] = name
+            mapping[full] = name
     return mapping
 
 
@@ -193,6 +393,100 @@ def _rewrite_images(rst_text, mapping, fmt):
             line = _IMG_RE.sub(_sub, line)
         out.append(line)
     return "\n".join(out)
+
+
+# A pandoc image substitution definition: the defining line plus any indented
+# option lines (":width: …", ":height: …", …) that follow it.
+_IMG_DEF_RE = re.compile(r"^(\.\.\s+\|([^|]+)\|\s+image::\s+(\S+))\s*$")
+
+
+def _extract_image_defs(rst_text):
+    """Pull pandoc's image substitution definitions out of the RST.
+
+    Returns ``(clean_text, defs)`` where *clean_text* is the RST with every
+    definition removed (blank-line run collapsed) and *defs* is an ordered list
+    of ``{"name": …, "lines": […full definition lines…]}`` in document order.
+    Only definitions of the ``.. |name| image:: target`` form are matched, so
+    plain text substitutions and the image *references* are left untouched.
+    """
+    lines = rst_text.split("\n")
+    defs = []
+    out = []
+    i, n = 0, len(lines)
+    while i < n:
+        m = _IMG_DEF_RE.match(lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+        block = [lines[i]]
+        j = i + 1
+        while j < n:
+            nxt = lines[j]
+            # Option lines are indented and start with ":" (":width: x", …);
+            # any other line (including another definition) ends the block.
+            if nxt.strip().startswith(":") and nxt[0].isspace():
+                block.append(nxt)
+                j += 1
+                continue
+            break
+        defs.append({"name": m.group(2).strip(), "lines": block})
+        i = j
+    # Collapse the blank-line run left behind by the removed definitions.
+    text = "\n".join(out)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text, defs
+
+
+def _used_defs(text, defs):
+    """The subset of *defs* referenced (``|name|``) in *text*, in def order.
+
+    A name counts as used only when its pipe token actually appears in the
+    body. The definition's own text is excluded by construction (definitions
+    have already been extracted out of the text).
+    """
+    used = []
+    for d in defs:
+        if ("|" + d["name"] + "|") in text:
+            used.append(d)
+    return used
+
+
+def _prepend_defs(text, defs):
+    """Prepend a file's needed image definitions right under its heading.
+
+    Each split file starts with its title line + underline line. The
+    definitions are inserted after that underline (before the body) so they
+    read as part of the file's preamble. When there is no recognizable
+    heading (e.g. the toctree-only index.rst), they go at the very top.
+    """
+    if not defs:
+        return text
+    block = "\n".join(l for d in defs for l in d["lines"])
+    lines = text.split("\n")
+    # Locate the end of the leading title/underline pair (title line, then a
+    # line of a single repeated non-space char). Fall back to the top.
+    insert_at = 0
+    if len(lines) >= 2 and lines[0].strip():
+        first = lines[0].strip()
+        under = lines[1].strip()
+        # Never treat a grid-table border (+ / | / = separator) as an
+        # underline: the file starts with a table, so go to the very top.
+        if (first[0] not in "+|" and under and len(set(under)) == 1
+                and not under[0].isalnum() and len(under) >= 3):
+            insert_at = 2
+    head = lines[:insert_at]
+    tail = lines[insert_at:]
+    # Strip leading blank lines from the tail so the block sits flush.
+    while tail and not tail[0].strip():
+        tail.pop(0)
+    parts = head
+    if head:
+        parts.append("")
+    parts.append(block)
+    parts.append("")
+    parts.extend(tail)
+    return "\n".join(parts).rstrip() + "\n"
 
 
 def _is_top_heading(title, underline):
@@ -343,8 +637,19 @@ def split_by_levels(rst_text, level=1, title="Documentation"):
 
     Returns ``{path: content}`` where paths are relative to the source root
     (e.g. ``index.rst``, ``overview/index.rst``, ``overview/background.rst``).
+
+    Pandoc's image substitution definitions (the ``.. |name| image:: …`` block
+    it emits at the end of a docx conversion) are extracted from the source and
+    re-inserted into exactly the files that reference each image, so every
+    generated chapter file is self-contained and its ``|name|`` references
+    resolve.
     """
-    flat = parse_headings(rst_text)
+    # Pandoc collects image substitution definitions at the end of the
+    # document; a chapter split would trap them in the last file, breaking
+    # every |name| reference elsewhere. Extract them now, split the clean
+    # body, then hand each file only the definitions it uses.
+    clean_text, image_defs = _extract_image_defs(rst_text)
+    flat = parse_headings(clean_text)
     real = [s for s in flat if (s["level"] >= 1) or (s["level"] == 0 and s["body"].strip())]
     if not real:
         return {}
@@ -378,13 +683,13 @@ def split_by_levels(rst_text, level=1, title="Documentation"):
         return node["level"] < level and any(
             c["level"] >= 1 for c in node["children"])
 
-    # Top-level index: a chapter is referenced as a folder (no extension) when
+    # Top-level index: a chapter is referenced as a folder ("{stem}/index") when
     # it is rendered as one, otherwise as a ``.rst`` file.
     top_items = []
     for ch in root["children"]:
         if ch["level"] >= 1:
             if is_folder(ch):
-                top_items.append("   " + ch["stem"])
+                top_items.append("   " + ch["stem"] + "/index")
             else:
                 top_items.append("   " + ch["stem"] + ".rst")
 
@@ -404,7 +709,7 @@ def split_by_levels(rst_text, level=1, title="Documentation"):
     # a chapter rendered as a file goes at ``<prefix>/<stem>.rst``.
     def render(node, prefix):
         if is_folder(node):
-            files[prefix + node["stem"] + "/index.rst"] = _index_content(node)
+            files[prefix + node["stem"] + "/index.rst"] = _index_content(node, is_folder)
             for ch in node["children"]:
                 if ch["level"] >= 1:
                     render(ch, prefix + node["stem"] + "/")
@@ -414,6 +719,13 @@ def split_by_levels(rst_text, level=1, title="Documentation"):
     for ch in root["children"]:
         if ch["level"] >= 1:
             render(ch, "")
+    # Make each generated file self-contained: RST substitutions only resolve
+    # within the file that defines them, so prepend the image definitions each
+    # file actually references. The top-level index.rst can carry the
+    # document's preamble (e.g. a docx cover page with images) when the title
+    # sits above the first level-1 heading, so it needs the same treatment.
+    for path in list(files):
+        files[path] = _prepend_defs(files[path], _used_defs(files[path], image_defs))
     return files
 
 
@@ -451,7 +763,7 @@ def _render_section(node):
     return out
 
 
-def _index_content(node):
+def _index_content(node, is_folder):
     """An index.rst for a folder chapter: own content + a toctree of children."""
     parts = []
     t = node["title"]
@@ -464,8 +776,8 @@ def _index_content(node):
     items = []
     for sub in node["children"]:
         if sub["level"] >= 1:
-            if any(c["level"] >= 1 for c in sub["children"]):
-                items.append("   " + sub["stem"])
+            if is_folder(sub):
+                items.append("   " + sub["stem"] + "/index")
             else:
                 items.append("   " + sub["stem"] + ".rst")
     if items:

@@ -107,11 +107,41 @@ def _err(e):
     return jsonify({"error": str(e), "detail": detail}), 500
 
 
+def _writable_dir(p):
+    """True when *p* exists and a file can actually be created + removed in it.
+
+    ``os.makedirs(exist_ok=True)`` succeeds on an existing directory even when
+    the app user cannot write into it (root-owned ``/work`` left by an earlier
+    run, a read-only mount, a stale dir), so creatability alone is not enough.
+    A real create/remove probe is the ground truth.
+    """
+    probe = os.path.join(p, ".rst-probe-%d" % os.getpid())
+    try:
+        with open(probe, "wb") as fh:
+            fh.write(b"")
+        os.remove(probe)
+        return True
+    except OSError:
+        try:
+            if os.path.exists(probe):
+                os.remove(probe)
+        except OSError:
+            pass
+        return False
+
+
 def _clean_work_root(raw):
     """Normalize an optional work-directory override to an absolute path.
 
     Blank / missing -> the app default (RST_WORK_ROOT env or <app>/work).
     Otherwise expand ~ and return an absolute path (created on demand).
+
+    An override the server cannot actually use must not crash the endpoint:
+    this covers both "cannot create it" (the Docker default ``/work`` sent from
+    a browser on a non-Docker box) and "it exists but is not writable" (a
+    root-owned ``/work`` from an earlier run, a read-only mount). In either
+    case fall back to the server default and log a warning, so the app keeps
+    working instead of 500ing on every clone.
     """
     default = os.environ.get(
         "RST_WORK_ROOT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "work")
@@ -121,8 +151,28 @@ def _clean_work_root(raw):
         return default
     p = os.path.expanduser(p)
     p = os.path.normpath(os.path.abspath(p))
-    os.makedirs(p, exist_ok=True)
-    return p
+    default_abs = os.path.normpath(os.path.abspath(default))
+    usable = False
+    try:
+        os.makedirs(p, exist_ok=True)
+        usable = _writable_dir(p)
+    except OSError:
+        usable = False
+    if usable:
+        return p
+    # Override unusable (won't create or isn't writable). Only fall back when
+    # it actually differs from the default (otherwise there is nothing to fall
+    # back to and the caller gets the real error).
+    if p != default_abs:
+        try:
+            os.makedirs(default, exist_ok=True)
+        except OSError:
+            raise
+        app.logger.warning(
+            "Work root %r is not usable (cannot create or write into it); "
+            "falling back to %r.", p, default)
+        return default
+    raise OSError("Work root %r is not writable and no fallback is available." % p)
 
 
 def _norm_mode(raw):
@@ -179,22 +229,48 @@ def _inline_images(html, repo, rst_path):
 
     def _sub(m):
         src = m.group(1)
-        # only local, non-data/absolute refs
-        if src.startswith(("http://", "https://", "data:", "mailto:", "/", "#")):
+        # Only local refs: skip remote / data URIs / anchors.
+        if src.startswith(("http://", "https://", "data:", "mailto:", "#")):
             return m.group(0)
-        base_dir = os.path.dirname(rst_path) or ""
-        candidate = os.path.normpath(
-            os.path.join(base_dir, src.lstrip("./").replace(os.sep, "/"))
-        ).replace(os.sep, "/")
-        try:
-            full = repo._safe_path(candidate)
-        except GitError:
-            return m.group(0)
-        if not os.path.isfile(full):
+        # Candidate paths to try, in order.
+        candidates = []
+        if src.startswith("/"):
+            # Sphinx-absolute ("/_static/images/x.png"): resolved against the
+            # doc *source* root, which is the repo root for a flat import but
+            # "<doc>/source/" for a chapter split. The importer always puts
+            # images in "<doc>/source/_static/images/", so try each ancestor
+            # of the .rst's directory (which includes both the repo root and
+            # the source root) as the base.
+            rel = src.lstrip("/").replace(os.sep, "/")
+            base = os.path.dirname(rst_path).replace(os.sep, "/")
+            while True:
+                candidates.append((base + "/" + rel).lstrip("/"))
+                if not base or "/" not in base:
+                    break
+                base = base.rsplit("/", 1)[0]
+        else:
+            base_dir = os.path.dirname(rst_path) or ""
+            candidates.append(os.path.normpath(
+                os.path.join(base_dir, src.lstrip("./").replace(os.sep, "/"))
+            ).replace(os.sep, "/"))
+        full = None
+        for cand in candidates:
+            try:
+                p = repo._safe_path(cand)
+            except GitError:
+                continue
+            if os.path.isfile(p):
+                full = p
+                break
+        if not full:
             return m.group(0)
         with open(full, "rb") as fh:
-            b64 = base64.b64encode(fh.read()).decode("ascii")
-        mime = mimetypes.guess_type(full)[0] or "image/png"
+            raw = fh.read()
+        b64 = base64.b64encode(raw).decode("ascii")
+        mime = mimetypes.guess_type(full)[0]
+        if not mime:
+            sniffed = _sniff_image_mime(raw[:16])
+            mime = sniffed[0] if sniffed else "image/png"
         return m.group(0).replace('src="' + src + '"',
                                   'src="data:' + mime + ';base64,' + b64 + '"')
 
@@ -340,6 +416,40 @@ def api_file_get():
 
 # Image extensions we know how to render as <img> in the browser.
 _IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".webp", ".ico", ".tiff", ".tif"}
+# Files with an unrecognized extension that are really images, by magic bytes.
+# Pandoc extracts docx media under its raw media name, and docx media can carry
+# a ".tmp" extension while actually being a PNG (or other format) — detect it
+# from the content so it previews like any other picture.
+_IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"BM", "image/bmp"),
+    (b"II*\x00", "image/tiff"),
+    (b"MM\x00*", "image/tiff"),
+    (b"RIFF", "image/webp"),   # RIFF....WEBP
+    (b"\x00\x00\x01\x00", "image/x-icon"),
+)
+
+
+def _sniff_image_mime(raw):
+    """Return (mime, ext) when *raw* starts with a known image magic, else None.
+
+    ``RIFF`` needs the ``WEBP`` fourcc at offset 8 to avoid matching other
+    RIFF containers (AVI, WAV).
+    """
+    for magic, mime in _IMAGE_MAGIC:
+        if raw[:len(magic)] == magic:
+            if magic == b"RIFF" and raw[8:12] != b"WEBP":
+                continue
+            ext = {
+                "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
+                "image/bmp": ".bmp", "image/tiff": ".tiff", "image/webp": ".webp",
+                "image/x-icon": ".ico",
+            }[mime]
+            return mime, ext
+    return None
 # Windows vector metafiles: browsers can't render .emf/.wmf in <img>, so we
 # convert them server-side. EMF is handled natively on Linux via the
 # `emf2svg-conv` tool (Debian package `emf2svg`) -> SVG; WMF has no reliable
@@ -434,8 +544,16 @@ def _classify_file(repo, path, text_content):
             return "binary", None
         if not raw:
             return "binary", None
-        mime = mimetypes.guess_type(path)[0] or (
-            "image/svg+xml" if ext == ".svg" else "application/octet-stream")
+        mime = mimetypes.guess_type(path)[0]
+        if not mime:
+            # Unknown extension but the content is an image (e.g. a docx media
+            # file named "image1.tmp" that is really a PNG): sniff the magic
+            # bytes so the picture still previews.
+            sniffed = _sniff_image_mime(raw)
+            mime = sniffed[0] if sniffed else (
+                "image/svg+xml" if ext == ".svg" else None)
+        if not mime:
+            return "binary", None
         data_uri = "data:%s;base64,%s" % (
             mime, base64.b64encode(raw).decode("ascii"))
         return "image", data_uri
@@ -450,6 +568,25 @@ def _classify_file(repo, path, text_content):
         if svg:
             return "image", "data:image/svg+xml;base64," + base64.b64encode(svg).decode("ascii")
         return "binary", None
+    # Unknown extension: sniff the bytes — docx media extracted by pandoc can
+    # be a real PNG/JPEG/etc. under a name like "image1.tmp".
+    if ext not in _IMAGE_EXT and ext not in _METAFILE_EXT:
+        try:
+            full = repo._safe_path(path)
+            with open(full, "rb") as fh:
+                raw = fh.read(16)
+        except Exception:
+            raw = b""
+        sniffed = _sniff_image_mime(raw) if raw else None
+        if sniffed:
+            try:
+                full = repo._safe_path(path)
+                with open(full, "rb") as fh:
+                    raw = fh.read()
+            except Exception:
+                return "binary", None
+            return "image", "data:%s;base64,%s" % (
+                sniffed[0], base64.b64encode(raw).decode("ascii"))
     # Heuristic: does the content contain a NUL byte or look non-UTF8?
     if "\x00" in text_content:
         return "binary", None
