@@ -214,6 +214,57 @@ with tempfile.TemporaryDirectory() as td:
     r6 = importer._correct_image_ext(p6)
     check("collision gets numeric suffix", r6 == "image11.png", r6)
 
+    # ---------------------------------------------------------------------
+    # _remove_word_toc: drop the Word static TOC (stale page numbers, no
+    # links) but leave a real "Contents" section or a short numbered list.
+    toc_doc = "\n".join([
+        "Intro",
+        "=====",
+        "",
+        "Some lead-in paragraph.",
+        "",
+        "Contents",
+        "",
+        "1 Solution Design 8",
+        "",
+        "1.1 Overview 8",
+        "",
+        "2 Deployment 19",
+        "",
+        "Solution Design",
+        "===============",
+        "",
+        "Real body text here.",
+    ])
+    toc_out = importer._remove_word_toc(toc_doc)
+    check("toc: 'Contents' removed", "Contents" not in toc_out, toc_out)
+    check("toc: stale entries removed", "1 Solution Design 8" not in toc_out
+          and "1.1 Overview 8" not in toc_out, toc_out)
+    check("toc: heading + body preserved",
+          "Solution Design" in toc_out and "Real body text here." in toc_out
+          and "Intro" in toc_out, toc_out)
+    check("toc: no doubled blank lines left",
+          "\n\n\n" not in toc_out, repr(toc_out))
+
+    # A "Contents" section with prose (no dotted-number+page list) is kept.
+    toc_keep = "Contents\n==========\n\nThis chapter lists the contents.\n"
+    check("toc: prose 'Contents' section kept",
+          "This chapter lists the contents." in importer._remove_word_toc(toc_keep),
+          importer._remove_word_toc(toc_keep))
+
+    # A short numbered list (one entry) after "Contents" is NOT a TOC -> kept.
+    toc_one = "Contents\n\n1 First item\n\nBody.\n"
+    check("toc: single-entry list kept",
+          "1 First item" in importer._remove_word_toc(toc_one),
+          importer._remove_word_toc(toc_one))
+
+    # Underlined TOC title variant.
+    toc_ul = "Body before\n\nContents\n========\n\n1 A 2\n\n2 B 5\n\nAfter\n-----\n\nx\n"
+    toc_ul_out = importer._remove_word_toc(toc_ul)
+    check("toc: underlined title removed too",
+          "1 A 2" not in toc_ul_out and "2 B 5" not in toc_ul_out
+          and "Body before" in toc_ul_out and "After" in toc_ul_out, toc_ul_out)
+
 print()
 print(f"{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
