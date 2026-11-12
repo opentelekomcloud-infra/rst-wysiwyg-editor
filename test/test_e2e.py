@@ -708,6 +708,23 @@ check("work-root endpoint", r.status_code == 200 and os.path.isabs(r.get_json()[
 import config_io as _ci
 check("work_root in CONFIG_KEYS", "work_root" in _ci.CONFIG_KEYS)
 
+# Reviewer finding #2: an override that EXISTS but is NOT writable (e.g. a
+# root-owned /work left by an earlier run, a read-only mount) must fall back to
+# the server default rather than 500ing. os.makedirs(exist_ok=True) succeeds on
+# such a dir, so the probe must actually try to write.
+from app import _clean_work_root as _cwr
+_ro = "/tmp/rsttest_ro_%d" % os.getpid()
+shutil.rmtree(_ro, ignore_errors=True)
+os.makedirs(_ro, exist_ok=True)
+os.chmod(_ro, 0o555)
+try:
+    fb = _cwr(_ro)
+    check("work_root: read-only override falls back to default",
+          os.path.isabs(fb) and fb != os.path.normpath(_ro), fb)
+finally:
+    os.chmod(_ro, 0o755)
+    shutil.rmtree(_ro, ignore_errors=True)
+
 # ----------------------------------------------------------------------
 # 26) Robustness: a non-string / object 'mode' must NOT 500 the endpoint.
 # (Regression for the real bug: the browser forwarded a ClickEvent object as the

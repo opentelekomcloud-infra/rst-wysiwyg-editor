@@ -170,9 +170,17 @@ def _sanitize_subst_names(rst_text):
     and its reference silently stop matching and the image never renders.
     Any name containing a backslash is renamed to a collision-free form
     (``img1``, ``img2``, … in first-appearance order) in BOTH the definitions
-    and the references, so they always agree. The rename shrinks the name,
-    so it also un-aligns any grid-table rows that embedded the original
-    name — :func:`_normalize_grid_tables` repairs that.
+    and the references, so they always agree.
+
+    The replacement is **padded with underscores to the original name's
+    length**. RST strips trailing/interior whitespace from substitution names
+    (a space-padded name is itself a "malformed substitution definition"), so
+    a non-space filler is used. Keeping the byte length identical is what
+    actually matters: pandoc sizes grid-table borders to the *original* cell
+    content, so a shorter name would shrink the row and misalign the ``|`` /
+    ``+`` borders → ``Malformed table``. A same-length name changes no width,
+    so no table can break (and :func:`_normalize_grid_tables` stays a no-op
+    safety net).
     """
     names = []
     for m in re.finditer(r"\.\.\s+\|([^|]+)\|\s+image::", rst_text):
@@ -186,7 +194,7 @@ def _sanitize_subst_names(rst_text):
         base = f"img{i}"
         while base in new_names.values():
             base += "x"
-        new_names[name] = base
+        new_names[name] = base + "_" * (len(name) - len(base))
 
     # A reference or definition name is the text between the surrounding
     # pipes. Rewrite only names that are on the unsafe list, leaving every

@@ -107,16 +107,41 @@ def _err(e):
     return jsonify({"error": str(e), "detail": detail}), 500
 
 
+def _writable_dir(p):
+    """True when *p* exists and a file can actually be created + removed in it.
+
+    ``os.makedirs(exist_ok=True)`` succeeds on an existing directory even when
+    the app user cannot write into it (root-owned ``/work`` left by an earlier
+    run, a read-only mount, a stale dir), so creatability alone is not enough.
+    A real create/remove probe is the ground truth.
+    """
+    probe = os.path.join(p, ".rst-probe-%d" % os.getpid())
+    try:
+        with open(probe, "wb") as fh:
+            fh.write(b"")
+        os.remove(probe)
+        return True
+    except OSError:
+        try:
+            if os.path.exists(probe):
+                os.remove(probe)
+        except OSError:
+            pass
+        return False
+
+
 def _clean_work_root(raw):
     """Normalize an optional work-directory override to an absolute path.
 
     Blank / missing -> the app default (RST_WORK_ROOT env or <app>/work).
     Otherwise expand ~ and return an absolute path (created on demand).
 
-    A client-stored override that the server cannot create (e.g. the Docker
-    default "/work" sent from a browser on a non-Docker box) must not crash the
-    endpoint: fall back to the server default (which is always writable) and log
-    a warning, so the app keeps working instead of 500ing on every clone.
+    An override the server cannot actually use must not crash the endpoint:
+    this covers both "cannot create it" (the Docker default ``/work`` sent from
+    a browser on a non-Docker box) and "it exists but is not writable" (a
+    root-owned ``/work`` from an earlier run, a read-only mount). In either
+    case fall back to the server default and log a warning, so the app keeps
+    working instead of 500ing on every clone.
     """
     default = os.environ.get(
         "RST_WORK_ROOT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "work")
@@ -126,21 +151,28 @@ def _clean_work_root(raw):
         return default
     p = os.path.expanduser(p)
     p = os.path.normpath(os.path.abspath(p))
+    default_abs = os.path.normpath(os.path.abspath(default))
+    usable = False
     try:
         os.makedirs(p, exist_ok=True)
+        usable = _writable_dir(p)
+    except OSError:
+        usable = False
+    if usable:
         return p
-    except OSError as e:
-        # Only fall back when the override actually differs from the default
-        # (otherwise there is nothing to fall back to).
-        if p != os.path.normpath(os.path.abspath(default)):
-            try:
-                os.makedirs(default, exist_ok=True)
-            except OSError:
-                raise
-            app.logger.warning(
-                "Cannot create work root %r (%s); falling back to %r.", p, e, default)
-            return default
-        raise
+    # Override unusable (won't create or isn't writable). Only fall back when
+    # it actually differs from the default (otherwise there is nothing to fall
+    # back to and the caller gets the real error).
+    if p != default_abs:
+        try:
+            os.makedirs(default, exist_ok=True)
+        except OSError:
+            raise
+        app.logger.warning(
+            "Work root %r is not usable (cannot create or write into it); "
+            "falling back to %r.", p, default)
+        return default
+    raise OSError("Work root %r is not writable and no fallback is available." % p)
 
 
 def _norm_mode(raw):

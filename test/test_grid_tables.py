@@ -104,9 +104,9 @@ text3 = (".. |" + orig_name + "| image:: _static/images/img1.png\n\n"
          "see |" + orig_name + "| and |" + orig_name + "|\n")
 s3 = importer._sanitize_subst_names(text3)
 check("sanitize: backslash name -> img1 in definition",
-      ".. |img1| image::" in s3, s3)
+      ".. |img1" in s3 and "| image::" in s3, s3)
 check("sanitize: both references rewritten",
-      s3.count("|img1|") == 3, s3)   # definition + 2 references
+      s3.count("|img1") == 3, s3)   # definition + 2 references (length-padded)
 check("sanitize: original name gone", orig_name not in s3, s3)
 
 text4 = ".. |plainname| image:: _static/images/x.png\n\nuse |plainname|\n"
@@ -132,6 +132,38 @@ check("normalize is a no-op on aligned tables",
 
 
 # --------------------------------------------------------------------- case 5
+# Reviewer finding #1: an image substitution in a NON-LAST (earlier) cell.
+# Renaming the name changes the cell width, shifting every following pipe;
+# the fix is a SAME-LENGTH safe name so no grid row changes width and no
+# table can become malformed.
+
+def _grid_first_cell(orig_name):
+    """A 2-col grid table whose first cell holds |orig_name|, sized to that
+    name's width (as pandoc would emit it)."""
+    c1w, c2w = len(orig_name), 20
+    top = "+" + "-" * c1w + "+" + "-" * c2w + "+"
+    row = "|" + orig_name.ljust(c1w) + "|" + " some text".ljust(c2w) + "|"
+    bot = "+" + "-" * c1w + "+" + "-" * c2w + "+"
+    return "\n".join([".. |" + orig_name + "| image:: /_static/images/x.png",
+                      "", top, row, bot, ""])
+
+orig_name1 = "C:\\c42bb3dcab"          # 13 chars incl. backslash
+doc1 = _grid_first_cell(orig_name1)
+n1 = importer._normalize_grid_tables(importer._sanitize_subst_names(doc1)).split("\n")
+# The renamed name is the SAME length as the original, so the row width and
+# every border are unchanged -> no row is shorter than the border.
+max_w = max(len(l) for l in n1 if l.startswith(("+", "|")))
+check("first-cell: no row shorter than the border after rename",
+      all(len(l) == max_w for l in n1 if l.startswith(("+", "|"))),
+      [len(l) for l in n1 if l])
+m1 = _docutils_msgs("\n".join(n1))
+check("first-cell: no malformed table after sanitize+normalize",
+      not any("alformed" in mm for mm in m1), m1[:4])
+# And the substitution name is safe (no backslash) yet resolves.
+check("first-cell: renamed name is RST-safe",
+      "\\" not in n1[0] and "|img" in n1[0], n1[0])
+
+# --------------------------------------------------------------------- case 6
 # _correct_image_ext: files whose extension is wrong for their content
 # (pandoc keeps a docx media's raw name, which can be ".tmp" for a real
 # PNG) are renamed to the extension their magic bytes identify; files with
