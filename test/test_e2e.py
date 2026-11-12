@@ -438,15 +438,42 @@ check("import rst refs _static/images", "/_static/images/" in rst_pic, rst_pic)
 
 # 20b) image whose media file is named ".tmp" (docx keeps the raw media name):
 # the importer must identify it from its magic bytes and store + reference it
-# with the correct extension.
-with tempfile.TemporaryDirectory() as td:
-    with open(td + "/p.tmp", "wb") as f:
+# with the correct extension. Fixture: build a docx with a real .png via
+# pandoc, then rename the embedded media to *.tmp inside the zip (and update
+# [Content_Types].xml + the rels target to match) — a pandoc-CLI markdown
+# build cannot embed a .tmp image (pandoc refuses unknown extensions), so the
+# package must be rewritten directly.
+def _docx_with_tmp_media(td, png):
+    import zipfile
+    with open(td + "/p.png", "wb") as f:
         f.write(png)
     with open(td + "/i.md", "w") as f:
-        f.write("# Pic\n\n![a pic](p.tmp)\n")
+        f.write("# Pic\n\n![a pic](p.png)\n")
     subprocess.run(["pandoc", "i.md", "-f", "markdown", "-t", "docx",
                     "-o", "i.docx"], check=True, cwd=td)
-    tmp_docx = open(td + "/i.docx", "rb").read()
+    zin = zipfile.ZipFile(td + "/i.docx")
+    src = next(n for n in zin.namelist() if n.startswith("word/media/"))
+    base = os.path.basename(src)
+    tmp_base = os.path.splitext(base)[0] + ".tmp"
+    out = zipfile.ZipFile(td + "/i2.docx", "w", zipfile.ZIP_DEFLATED)
+    for item in zin.namelist():
+        data = zin.read(item)
+        if item == "[Content_Types].xml":
+            data = data.decode("utf-8").replace(
+                'Extension="png" ContentType="image/png"',
+                'Extension="tmp" ContentType="image/png"').encode("utf-8")
+        elif item == "word/_rels/document.xml.rels":
+            data = data.decode("utf-8").replace(
+                'Target="media/' + base + '"',
+                'Target="media/' + tmp_base + '"').encode("utf-8")
+        if item == src:
+            item = "word/media/" + tmp_base
+        out.writestr(item, data)
+    out.close()
+    return open(td + "/i2.docx", "rb").read()
+
+with tempfile.TemporaryDirectory() as td:
+    tmp_docx = _docx_with_tmp_media(td, png)
 fs3b = FileStorage(stream=io.BytesIO(tmp_docx), filename="tmpimg.docx")
 r = client.post("/api/import", data={"repo_id": imp_repo, "file": fs3b,
                                      "doc_folder": "umn", "mode": "single",
