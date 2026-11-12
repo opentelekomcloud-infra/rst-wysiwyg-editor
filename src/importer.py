@@ -105,6 +105,85 @@ def make_stem(title, used=None, max_len=MAX_STEM_LEN):
 _IMG_RE = re.compile(r"((?:\.\.\s*\|[^|]*\|\s*)?(?:image|figure)::\s*)(\S+)")
 
 
+# A Word table-of-contents *entry*, as pandoc emits it: a dotted number, a
+# title, and a trailing (stale) page number — e.g. "1.2 Architecture 9".
+# The page number is the last integer on the line; the dotted number is the
+# leading one. Requires at least one real (non-digit) character in the title so
+# "1.2 9" or "8" alone never match.
+_TOC_ENTRY_RE = re.compile(r"^\s*\d+(?:\.\d+)*\s+\D.*\d\s*$")
+# Heading-underline line (=== or ---) — a TOC block never contains these.
+_UNDERLINE_RE = re.compile(r"^\s*={3,}\s*$|^\s*-{3,}\s*$")
+# Words that legitimately name a "table of contents" section.
+_TOC_TITLE_WORDS = {"contents", "table of contents", "inhaltsverzeichnis", "table des matières"}
+
+
+def _remove_word_toc(rst_text):
+    """Drop the Word-generated "Table of Contents" block from imported RST.
+
+    Word documents carry a *static* TOC: a ``Contents`` heading followed by
+    entries like ``1 Solution Design 8``. Pandoc turns these into **plain
+    text** — there are no real links, and the trailing ``8`` is a *page number
+    from the original .docx*, which is meaningless in RST/Sphinx (and is
+    always wrong after any edit). Fixing it into real cross-file ``:ref:``
+    links is not feasible for a chapter-split build, so it is removed instead:
+    the import already emits a ``.. toctree::`` per folder, and Sphinx builds
+    the full TOC on the main ``index.rst`` at render time, so the document's
+    structure is fully preserved.
+
+    Only a genuine TOC block is removed — a ``Contents`` section with no
+    dotted-number+page-number list is left alone.
+    """
+    lines = rst_text.split("\n")
+    n = len(lines)
+    i = 0
+    while i < n:
+        text = lines[i].strip()
+        base = text.lower().rstrip(":.")
+        is_underlined = (i + 1 < n and _UNDERLINE_RE.match(lines[i + 1])
+                         and re.match(r"^\s*\S", lines[i]))
+        if base in _TOC_TITLE_WORDS and (
+                is_underlined or (i + 1 < n and not lines[i + 1].strip())):
+            # Look past the title + its underline (if any) to the first content
+            # line; it must be a TOC entry.
+            j = i + (2 if is_underlined else 1)
+            while j < n and not lines[j].strip():
+                j += 1
+            if j < n and _TOC_ENTRY_RE.match(lines[j]):
+                # Need at least two entries (the blank lines pandoc puts
+                # between them are part of the block) to call it a TOC and not
+                # a short numbered list.
+                end = j
+                entries = 1
+                while end + 1 < n:
+                    if lines[end + 1].strip():
+                        if _TOC_ENTRY_RE.match(lines[end + 1]):
+                            end += 1
+                            entries += 1
+                        else:
+                            break
+                    else:
+                        ee = end + 1
+                        while ee < n and not lines[ee].strip():
+                            ee += 1
+                        if ee < n and _TOC_ENTRY_RE.match(lines[ee]):
+                            end = ee
+                            entries += 1
+                        else:
+                            break
+                if entries >= 2:
+                    # Remove the title through the last entry; collapse the
+                    # two blank lines left at the seam to one.
+                    del lines[i:end + 1]
+                    n = len(lines)
+                    if i > 0 and i < n and not lines[i - 1].strip() \
+                            and not lines[i].strip():
+                        del lines[i]
+                        n = len(lines)
+                    continue
+        i += 1
+    return "\n".join(lines)
+
+
 def convert_to_rst(src_bytes, fmt, media_dir, source_dir):
     """Convert a docx/html/markdown document to RST via pandoc.
 
@@ -149,6 +228,10 @@ def convert_to_rst(src_bytes, fmt, media_dir, source_dir):
 
     # Rewrite references (docx uses rIdN; markdown uses original names).
     new_rst = _rewrite_images(rst_text, mapping, fmt)
+    # Drop the Word-generated static "Table of Contents" (plain text with
+    # stale .docx page numbers, no real links). The per-folder toctrees the
+    # import generates + Sphinx's own TOC replace it.
+    new_rst = _remove_word_toc(new_rst)
     # Sanitize image substitution *names* that are not RST-safe (pandoc uses
     # the original Windows image path, e.g. "C:\c42bb3dc…", for some docx
     # images; a backslash in a substitution name is eaten by RST's escape

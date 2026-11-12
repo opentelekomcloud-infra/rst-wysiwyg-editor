@@ -1585,6 +1585,9 @@
     $("pr-head-input").value = state.currentBranch;
     $("pr-head").textContent = state.currentBranch;
     $("pr-result-link").classList.add("hidden");
+    const createBtn = $("pr-create");
+    createBtn.disabled = false;
+    createBtn.textContent = "Create";
     toast($("pr-status"), "", "");
   });
 
@@ -1596,6 +1599,9 @@
   });
 
   $("pr-cancel").addEventListener("click", () => $("pr-dialog").classList.add("hidden"));
+  // Close simply hides the dialog (e.g. after a successful create, where
+  // "Cancel" would be misleading). Cancel + Create both remain available.
+  $("pr-close").addEventListener("click", () => $("pr-dialog").classList.add("hidden"));
 
   $("pr-create").addEventListener("click", async () => {
     const s = window.__settings || {};
@@ -1647,6 +1653,11 @@
     link.textContent = "Open PR #" + d.number + " →";
     link.href = d.html_url;
     link.classList.remove("hidden");
+    // The PR exists now — Create is no longer an action. Close the window via
+    // Close (or Cancel); the "Open PR" link stays for the user to follow.
+    const createBtn = $("pr-create");
+    createBtn.disabled = true;
+    createBtn.textContent = "Created";
   });
 
   // ------------------------------------------------------------- import
