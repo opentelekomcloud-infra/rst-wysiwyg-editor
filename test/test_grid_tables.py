@@ -214,6 +214,105 @@ with tempfile.TemporaryDirectory() as td:
     r6 = importer._correct_image_ext(p6)
     check("collision gets numeric suffix", r6 == "image11.png", r6)
 
+    # ---------------------------------------------------------------------
+    # _remove_word_toc: drop the Word static TOC (stale page numbers, no
+    # links) but leave a real "Contents" section or a short numbered list.
+    toc_doc = "\n".join([
+        "Intro",
+        "=====",
+        "",
+        "Some lead-in paragraph.",
+        "",
+        "Contents",
+        "",
+        "1 Solution Design 8",
+        "",
+        "1.1 Overview 8",
+        "",
+        "2 Deployment 19",
+        "",
+        "Solution Design",
+        "===============",
+        "",
+        "Real body text here.",
+    ])
+    toc_out = importer._remove_word_toc(toc_doc)
+    check("toc: 'Contents' removed", "Contents" not in toc_out, toc_out)
+    check("toc: stale entries removed", "1 Solution Design 8" not in toc_out
+          and "1.1 Overview 8" not in toc_out, toc_out)
+    check("toc: heading + body preserved",
+          "Solution Design" in toc_out and "Real body text here." in toc_out
+          and "Intro" in toc_out, toc_out)
+    check("toc: no doubled blank lines left",
+          "\n\n\n" not in toc_out, repr(toc_out))
+
+    # A "Contents" section with prose (no dotted-number+page list) is kept.
+    toc_keep = "Contents\n==========\n\nThis chapter lists the contents.\n"
+    check("toc: prose 'Contents' section kept",
+          "This chapter lists the contents." in importer._remove_word_toc(toc_keep),
+          importer._remove_word_toc(toc_keep))
+
+    # A short numbered list (one entry) after "Contents" is NOT a TOC -> kept.
+    toc_one = "Contents\n\n1 First item\n\nBody.\n"
+    check("toc: single-entry list kept",
+          "1 First item" in importer._remove_word_toc(toc_one),
+          importer._remove_word_toc(toc_one))
+
+    # Underlined TOC title variant.
+    toc_ul = "Body before\n\nContents\n========\n\n1 A 2\n\n2 B 5\n\nAfter\n-----\n\nx\n"
+    toc_ul_out = importer._remove_word_toc(toc_ul)
+    check("toc: underlined title removed too",
+          "1 A 2" not in toc_ul_out and "2 B 5" not in toc_ul_out
+          and "Body before" in toc_ul_out and "After" in toc_ul_out, toc_ul_out)
+
+    # Regression (reviewer): digit-initial titles ("3GPP") must be removed,
+    # not left behind when the scanner hits them mid-list.
+    toc_3gpp = "Contents\n========\n\n1 Solution Design 8\n\n1.1 Overview 8\n" \
+        "\n2.3 3GPP Network Architecture 15\n\n2.4 Security 22\n\n" \
+        "Solution Design\n===============\n\nBody\n"
+    toc_3gpp_out = importer._remove_word_toc(toc_3gpp)
+    check("toc: digit-initial titles (3GPP) fully removed",
+          "3GPP" not in toc_3gpp_out and "2.4 Security 22" not in toc_3gpp_out
+          and "Contents" not in toc_3gpp_out and "Body" in toc_3gpp_out,
+          toc_3gpp_out)
+
+    # Regression (reviewer): unnumbered entries (Appendix) mean the block end
+    # is ambiguous -> keep the WHOLE TOC rather than half-removing it.
+    toc_appx = "Contents\n========\n\n1 Solution Design 8\n1.1 Overview 8\n" \
+        "Appendix A Acronyms 45\nAppendix B References 47\n\n" \
+        "Solution Design\n===============\n\nBody\n"
+    toc_appx_out = importer._remove_word_toc(toc_appx)
+    check("toc: ambiguous block (appendix) kept whole, never half-removed",
+          "Contents" in toc_appx_out and "Appendix A Acronyms 45" in toc_appx_out
+          and "1 Solution Design 8" in toc_appx_out, toc_appx_out)
+
+    # Regression (reviewer 2): hyperlinked entries (TOC field with \h).
+    # Pandoc wraps each entry in an RST inline link; page number may sit
+    # outside or inside the link.
+    toc_hl_out = "Contents\n========\n\n`1 Solution Design <#_Toc1>`__ 8\n\n" \
+        "`1.1 Overview <#_Toc2>`__ 8\n\n`2 Deployment <#_Toc3>`__ 19\n\n" \
+        "Solution Design\n===============\n\nBody\n"
+    toc_hl_out_r = importer._remove_word_toc(toc_hl_out)
+    check("toc: hyperlinked entries (page outside link) removed",
+          "Contents" not in toc_hl_out_r and "_Toc" not in toc_hl_out_r
+          and "Body" in toc_hl_out_r, toc_hl_out_r)
+
+    toc_hl_in = "Contents\n========\n\n`1 Solution Design 8 <#_Toc1>`__\n\n" \
+        "`1.1 Overview 8 <#_Toc2>`__\n\n" \
+        "Solution Design\n===============\n\nBody\n"
+    toc_hl_in_r = importer._remove_word_toc(toc_hl_in)
+    check("toc: hyperlinked entries (page inside link) removed",
+          "Contents" not in toc_hl_in_r and "_Toc" not in toc_hl_in_r
+          and "Body" in toc_hl_in_r, toc_hl_in_r)
+
+    # Genuine (unnumbered) RST links are NOT TOC entries -> block kept whole.
+    toc_links = "Contents\n\n`see the docs <https://example.com>`__\n\n" \
+        "`another link <https://x.io>`__\n\nBody\n"
+    toc_links_r = importer._remove_word_toc(toc_links)
+    check("toc: plain RST links not mistaken for TOC entries",
+          "Contents" in toc_links_r and "see the docs" in toc_links_r,
+          toc_links_r)
+
 print()
 print(f"{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

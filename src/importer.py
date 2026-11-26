@@ -105,6 +105,130 @@ def make_stem(title, used=None, max_len=MAX_STEM_LEN):
 _IMG_RE = re.compile(r"((?:\.\.\s*\|[^|]*\|\s*)?(?:image|figure)::\s*)(\S+)")
 
 
+# A Word table-of-contents *entry*, as pandoc emits it: a dotted number, a
+# title, and a trailing (stale) page number — e.g. "1.2 Architecture 9" or
+# "2.3 3GPP Network Architecture 15". The page number is the last integer on
+# the line; the dotted number is the leading one. The title must contain a
+# letter *somewhere* (a digit-initial title like "3GPP" is fine), so "1.2 9"
+# or "8" alone never match. Unnumbered entries ("Appendix A Acronyms 45") do
+# NOT match — those are handled by the heading-boundary check below (a block
+# that ends ambiguously is kept whole rather than half-removed).
+_TOC_ENTRY_RE = re.compile(r"^\s*\d+(?:\.\d+)*\s+(?=.*[A-Za-z]).*\d\s*$")
+# A Word TOC entry whose text is a hyperlink (TOC field with \h): pandoc emits
+#   `1 Solution Design <#_Toc1>`__ 8      (page number outside the link)
+# or  `1 Solution Design 8 <#_Toc1>`__    (page number inside the link).
+# The line starts with a backtick, so the plain-text entry regex misses it. We
+# unwrap the link to its visible text and re-append any outside page number,
+# then classify that visible text. Group 1 = link text, group 2 = outside page
+# number (optional). The anchor (#_TocN) is dropped so its digits can't fake
+# the trailing page number.
+_TOC_LINK_RE = re.compile(r"^\s*`([^`<]+?)\s*<[^>]*>`__\s*(\d+)?\s*$")
+# Heading-underline line (=== or ---) — a TOC block never contains these.
+_UNDERLINE_RE = re.compile(r"^\s*={3,}\s*$|^\s*-{3,}\s*$")
+# Words that legitimately name a "table of contents" section.
+_TOC_TITLE_WORDS = {"contents", "table of contents", "inhaltsverzeichnis", "table des matières"}
+
+
+def _is_toc_entry(line):
+    r"""True if *line* is a Word TOC entry, plain or hyperlink-wrapped.
+
+    Handles the three shapes pandoc emits for a ``TOC \o "1-3" \h`` field:
+    the plain-text entry, `` `text <#anchor>`__ <page> ``, and
+    `` `text <page> <#anchor>`__ ``. Hyperlink entries are normalised to their
+    visible text (plus any outside page number) before matching, so the same
+    entry regex classifies all of them.
+    """
+    m = _TOC_LINK_RE.match(line)
+    if m:
+        visible = m.group(1).strip()
+        if m.group(2):
+            visible = visible + " " + m.group(2)
+        return _TOC_ENTRY_RE.match(visible) is not None
+    return _TOC_ENTRY_RE.match(line) is not None
+
+
+def _remove_word_toc(rst_text):
+    """Drop the Word-generated "Table of Contents" block from imported RST.
+
+    Word documents carry a *static* TOC: a ``Contents`` heading followed by
+    entries like ``1 Solution Design 8``. Pandoc turns these into **plain
+    text** — there are no real links, and the trailing ``8`` is a *page number
+    from the original .docx*, which is meaningless in RST/Sphinx (and is
+    always wrong after any edit). Fixing it into real cross-file ``:ref:``
+    links is not feasible for a chapter-split build, so it is removed instead:
+    the import already emits a ``.. toctree::`` per folder, and Sphinx builds
+    the full TOC on the main ``index.rst`` at render time, so the document's
+    structure is fully preserved.
+
+    Only a genuine TOC block is removed — a ``Contents`` section with no
+    dotted-number+page-number list is left alone.
+    """
+    lines = rst_text.split("\n")
+    n = len(lines)
+    i = 0
+    while i < n:
+        text = lines[i].strip()
+        base = text.lower().rstrip(":.")
+        is_underlined = (i + 1 < n and _UNDERLINE_RE.match(lines[i + 1])
+                         and re.match(r"^\s*\S", lines[i]))
+        if base in _TOC_TITLE_WORDS and (
+                is_underlined or (i + 1 < n and not lines[i + 1].strip())):
+            # Look past the title + its underline (if any) to the first content
+            # line; it must be a TOC entry.
+            j = i + (2 if is_underlined else 1)
+            while j < n and not lines[j].strip():
+                j += 1
+            if j < n and _is_toc_entry(lines[j]):
+                # Need at least two entries (the blank lines pandoc puts
+                # between them are part of the block) to call it a TOC and not
+                # a short numbered list.
+                end = j
+                entries = 1
+                while end + 1 < n:
+                    if lines[end + 1].strip():
+                        if _is_toc_entry(lines[end + 1]):
+                            end += 1
+                            entries += 1
+                        else:
+                            break
+                    else:
+                        ee = end + 1
+                        while ee < n and not lines[ee].strip():
+                            ee += 1
+                        if ee < n and _is_toc_entry(lines[ee]):
+                            end = ee
+                            entries += 1
+                        else:
+                            break
+                if entries >= 2:
+                    # Never half-remove: the block is a TOC only when what
+                    # follows it is real content — an RST heading (a line with
+                    # an underline) or the end of the document. If the next
+                    # content line is a plain paragraph (e.g. an unnumbered
+                    # "Appendix A …" entry the regex can't classify), the
+                    # "Contents" block is not a plain-text TOC we can delimit
+                    # reliably, so it is kept whole (the pre-import behaviour)
+                    # rather than chopped down to a fragment.
+                    k2 = end + 1
+                    while k2 < n and not lines[k2].strip():
+                        k2 += 1
+                    if k2 >= n or (
+                            k2 + 1 < n
+                            and re.match(r"^\s*\S", lines[k2])
+                            and _UNDERLINE_RE.match(lines[k2 + 1])):
+                        # Remove the title through the last entry; collapse
+                        # the two blank lines left at the seam to one.
+                        del lines[i:end + 1]
+                        n = len(lines)
+                        if i > 0 and i < n and not lines[i - 1].strip() \
+                                and not lines[i].strip():
+                            del lines[i]
+                            n = len(lines)
+                        continue
+        i += 1
+    return "\n".join(lines)
+
+
 def convert_to_rst(src_bytes, fmt, media_dir, source_dir):
     """Convert a docx/html/markdown document to RST via pandoc.
 
@@ -149,6 +273,10 @@ def convert_to_rst(src_bytes, fmt, media_dir, source_dir):
 
     # Rewrite references (docx uses rIdN; markdown uses original names).
     new_rst = _rewrite_images(rst_text, mapping, fmt)
+    # Drop the Word-generated static "Table of Contents" (plain text with
+    # stale .docx page numbers, no real links). The per-folder toctrees the
+    # import generates + Sphinx's own TOC replace it.
+    new_rst = _remove_word_toc(new_rst)
     # Sanitize image substitution *names* that are not RST-safe (pandoc uses
     # the original Windows image path, e.g. "C:\c42bb3dc…", for some docx
     # images; a backslash in a substitution name is eaten by RST's escape
