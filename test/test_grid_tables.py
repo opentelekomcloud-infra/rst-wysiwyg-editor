@@ -286,6 +286,33 @@ with tempfile.TemporaryDirectory() as td:
           "Contents" in toc_appx_out and "Appendix A Acronyms 45" in toc_appx_out
           and "1 Solution Design 8" in toc_appx_out, toc_appx_out)
 
+    # Regression (reviewer 2): hyperlinked entries (TOC field with \h).
+    # Pandoc wraps each entry in an RST inline link; page number may sit
+    # outside or inside the link.
+    toc_hl_out = "Contents\n========\n\n`1 Solution Design <#_Toc1>`__ 8\n\n" \
+        "`1.1 Overview <#_Toc2>`__ 8\n\n`2 Deployment <#_Toc3>`__ 19\n\n" \
+        "Solution Design\n===============\n\nBody\n"
+    toc_hl_out_r = importer._remove_word_toc(toc_hl_out)
+    check("toc: hyperlinked entries (page outside link) removed",
+          "Contents" not in toc_hl_out_r and "_Toc" not in toc_hl_out_r
+          and "Body" in toc_hl_out_r, toc_hl_out_r)
+
+    toc_hl_in = "Contents\n========\n\n`1 Solution Design 8 <#_Toc1>`__\n\n" \
+        "`1.1 Overview 8 <#_Toc2>`__\n\n" \
+        "Solution Design\n===============\n\nBody\n"
+    toc_hl_in_r = importer._remove_word_toc(toc_hl_in)
+    check("toc: hyperlinked entries (page inside link) removed",
+          "Contents" not in toc_hl_in_r and "_Toc" not in toc_hl_in_r
+          and "Body" in toc_hl_in_r, toc_hl_in_r)
+
+    # Genuine (unnumbered) RST links are NOT TOC entries -> block kept whole.
+    toc_links = "Contents\n\n`see the docs <https://example.com>`__\n\n" \
+        "`another link <https://x.io>`__\n\nBody\n"
+    toc_links_r = importer._remove_word_toc(toc_links)
+    check("toc: plain RST links not mistaken for TOC entries",
+          "Contents" in toc_links_r and "see the docs" in toc_links_r,
+          toc_links_r)
+
 print()
 print(f"{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

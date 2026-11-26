@@ -114,10 +114,37 @@ _IMG_RE = re.compile(r"((?:\.\.\s*\|[^|]*\|\s*)?(?:image|figure)::\s*)(\S+)")
 # NOT match — those are handled by the heading-boundary check below (a block
 # that ends ambiguously is kept whole rather than half-removed).
 _TOC_ENTRY_RE = re.compile(r"^\s*\d+(?:\.\d+)*\s+(?=.*[A-Za-z]).*\d\s*$")
+# A Word TOC entry whose text is a hyperlink (TOC field with \h): pandoc emits
+#   `1 Solution Design <#_Toc1>`__ 8      (page number outside the link)
+# or  `1 Solution Design 8 <#_Toc1>`__    (page number inside the link).
+# The line starts with a backtick, so the plain-text entry regex misses it. We
+# unwrap the link to its visible text and re-append any outside page number,
+# then classify that visible text. Group 1 = link text, group 2 = outside page
+# number (optional). The anchor (#_TocN) is dropped so its digits can't fake
+# the trailing page number.
+_TOC_LINK_RE = re.compile(r"^\s*`([^`<]+?)\s*<[^>]*>`__\s*(\d+)?\s*$")
 # Heading-underline line (=== or ---) — a TOC block never contains these.
 _UNDERLINE_RE = re.compile(r"^\s*={3,}\s*$|^\s*-{3,}\s*$")
 # Words that legitimately name a "table of contents" section.
 _TOC_TITLE_WORDS = {"contents", "table of contents", "inhaltsverzeichnis", "table des matières"}
+
+
+def _is_toc_entry(line):
+    r"""True if *line* is a Word TOC entry, plain or hyperlink-wrapped.
+
+    Handles the three shapes pandoc emits for a ``TOC \o "1-3" \h`` field:
+    the plain-text entry, `` `text <#anchor>`__ <page> ``, and
+    `` `text <page> <#anchor>`__ ``. Hyperlink entries are normalised to their
+    visible text (plus any outside page number) before matching, so the same
+    entry regex classifies all of them.
+    """
+    m = _TOC_LINK_RE.match(line)
+    if m:
+        visible = m.group(1).strip()
+        if m.group(2):
+            visible = visible + " " + m.group(2)
+        return _TOC_ENTRY_RE.match(visible) is not None
+    return _TOC_ENTRY_RE.match(line) is not None
 
 
 def _remove_word_toc(rst_text):
@@ -151,7 +178,7 @@ def _remove_word_toc(rst_text):
             j = i + (2 if is_underlined else 1)
             while j < n and not lines[j].strip():
                 j += 1
-            if j < n and _TOC_ENTRY_RE.match(lines[j]):
+            if j < n and _is_toc_entry(lines[j]):
                 # Need at least two entries (the blank lines pandoc puts
                 # between them are part of the block) to call it a TOC and not
                 # a short numbered list.
@@ -159,7 +186,7 @@ def _remove_word_toc(rst_text):
                 entries = 1
                 while end + 1 < n:
                     if lines[end + 1].strip():
-                        if _TOC_ENTRY_RE.match(lines[end + 1]):
+                        if _is_toc_entry(lines[end + 1]):
                             end += 1
                             entries += 1
                         else:
@@ -168,7 +195,7 @@ def _remove_word_toc(rst_text):
                         ee = end + 1
                         while ee < n and not lines[ee].strip():
                             ee += 1
-                        if ee < n and _TOC_ENTRY_RE.match(lines[ee]):
+                        if ee < n and _is_toc_entry(lines[ee]):
                             end = ee
                             entries += 1
                         else:
