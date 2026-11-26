@@ -265,6 +265,27 @@ with tempfile.TemporaryDirectory() as td:
           "1 A 2" not in toc_ul_out and "2 B 5" not in toc_ul_out
           and "Body before" in toc_ul_out and "After" in toc_ul_out, toc_ul_out)
 
+    # Regression (reviewer): digit-initial titles ("3GPP") must be removed,
+    # not left behind when the scanner hits them mid-list.
+    toc_3gpp = "Contents\n========\n\n1 Solution Design 8\n\n1.1 Overview 8\n" \
+        "\n2.3 3GPP Network Architecture 15\n\n2.4 Security 22\n\n" \
+        "Solution Design\n===============\n\nBody\n"
+    toc_3gpp_out = importer._remove_word_toc(toc_3gpp)
+    check("toc: digit-initial titles (3GPP) fully removed",
+          "3GPP" not in toc_3gpp_out and "2.4 Security 22" not in toc_3gpp_out
+          and "Contents" not in toc_3gpp_out and "Body" in toc_3gpp_out,
+          toc_3gpp_out)
+
+    # Regression (reviewer): unnumbered entries (Appendix) mean the block end
+    # is ambiguous -> keep the WHOLE TOC rather than half-removing it.
+    toc_appx = "Contents\n========\n\n1 Solution Design 8\n1.1 Overview 8\n" \
+        "Appendix A Acronyms 45\nAppendix B References 47\n\n" \
+        "Solution Design\n===============\n\nBody\n"
+    toc_appx_out = importer._remove_word_toc(toc_appx)
+    check("toc: ambiguous block (appendix) kept whole, never half-removed",
+          "Contents" in toc_appx_out and "Appendix A Acronyms 45" in toc_appx_out
+          and "1 Solution Design 8" in toc_appx_out, toc_appx_out)
+
 print()
 print(f"{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

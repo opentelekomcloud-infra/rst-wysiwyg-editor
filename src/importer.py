@@ -106,11 +106,14 @@ _IMG_RE = re.compile(r"((?:\.\.\s*\|[^|]*\|\s*)?(?:image|figure)::\s*)(\S+)")
 
 
 # A Word table-of-contents *entry*, as pandoc emits it: a dotted number, a
-# title, and a trailing (stale) page number — e.g. "1.2 Architecture 9".
-# The page number is the last integer on the line; the dotted number is the
-# leading one. Requires at least one real (non-digit) character in the title so
-# "1.2 9" or "8" alone never match.
-_TOC_ENTRY_RE = re.compile(r"^\s*\d+(?:\.\d+)*\s+\D.*\d\s*$")
+# title, and a trailing (stale) page number — e.g. "1.2 Architecture 9" or
+# "2.3 3GPP Network Architecture 15". The page number is the last integer on
+# the line; the dotted number is the leading one. The title must contain a
+# letter *somewhere* (a digit-initial title like "3GPP" is fine), so "1.2 9"
+# or "8" alone never match. Unnumbered entries ("Appendix A Acronyms 45") do
+# NOT match — those are handled by the heading-boundary check below (a block
+# that ends ambiguously is kept whole rather than half-removed).
+_TOC_ENTRY_RE = re.compile(r"^\s*\d+(?:\.\d+)*\s+(?=.*[A-Za-z]).*\d\s*$")
 # Heading-underline line (=== or ---) — a TOC block never contains these.
 _UNDERLINE_RE = re.compile(r"^\s*={3,}\s*$|^\s*-{3,}\s*$")
 # Words that legitimately name a "table of contents" section.
@@ -171,15 +174,30 @@ def _remove_word_toc(rst_text):
                         else:
                             break
                 if entries >= 2:
-                    # Remove the title through the last entry; collapse the
-                    # two blank lines left at the seam to one.
-                    del lines[i:end + 1]
-                    n = len(lines)
-                    if i > 0 and i < n and not lines[i - 1].strip() \
-                            and not lines[i].strip():
-                        del lines[i]
+                    # Never half-remove: the block is a TOC only when what
+                    # follows it is real content — an RST heading (a line with
+                    # an underline) or the end of the document. If the next
+                    # content line is a plain paragraph (e.g. an unnumbered
+                    # "Appendix A …" entry the regex can't classify), the
+                    # "Contents" block is not a plain-text TOC we can delimit
+                    # reliably, so it is kept whole (the pre-import behaviour)
+                    # rather than chopped down to a fragment.
+                    k2 = end + 1
+                    while k2 < n and not lines[k2].strip():
+                        k2 += 1
+                    if k2 >= n or (
+                            k2 + 1 < n
+                            and re.match(r"^\s*\S", lines[k2])
+                            and _UNDERLINE_RE.match(lines[k2 + 1])):
+                        # Remove the title through the last entry; collapse
+                        # the two blank lines left at the seam to one.
+                        del lines[i:end + 1]
                         n = len(lines)
-                    continue
+                        if i > 0 and i < n and not lines[i - 1].strip() \
+                                and not lines[i].strip():
+                            del lines[i]
+                            n = len(lines)
+                        continue
         i += 1
     return "\n".join(lines)
 
